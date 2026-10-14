@@ -1,0 +1,10 @@
+.env
+.env.*
+node_modules
+dist
+.git
+tests
+scripts
+docs
+server/migrations
+server/supabase.sql
