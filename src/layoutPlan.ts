@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { templateSchema, types } from "./model";
-import { arrange } from "./layout";
+import { templateSchema, types } from "./model.js";
+import { arrange } from "./layout.js";
 export const planningSchema = z
   .object({
     goal: z.string().min(1).max(300),

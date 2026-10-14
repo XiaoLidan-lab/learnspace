@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { types, labels, MAX_MODULES, type ModuleType } from "./definitions";
-export { types, labels, MAX_MODULES } from "./definitions";
-export type { ModuleType } from "./definitions";
+import { types, labels, MAX_MODULES, type ModuleType } from "./definitions.js";
+export { types, labels, MAX_MODULES } from "./definitions.js";
+export type { ModuleType } from "./definitions.js";
 export const layoutSchema = z
   .object({
     x: z.number().int().min(0).max(11),

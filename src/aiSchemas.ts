@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { validateLayoutPlan } from "./layoutPlan";
+import { validateLayoutPlan } from "./layoutPlan.js";
 export const cardsSchema = z
   .object({
     cards: z

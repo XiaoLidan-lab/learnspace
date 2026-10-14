@@ -1,1 +1,1 @@
-export { default } from "./ai";
+export { default } from "./ai.js";

@@ -1,5 +1,5 @@
-import { uid, type Mod, type Template } from "./model";
-import { definitions } from "./definitions";
+import { uid, type Mod, type Template } from "./model.js";
+import { definitions } from "./definitions.js";
 export type LayoutPreset = "双栏" | "三栏" | "四宫格" | "主次" | "自适应";
 export function overlaps(a: Mod["layout"], b: Mod["layout"]) {
   return (

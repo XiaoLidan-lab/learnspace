@@ -1,8 +1,8 @@
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
-import { definitions, MAX_MODULES } from "../src/definitions";
-import { validateAIResult } from "../src/aiSchemas";
+import { definitions, MAX_MODULES } from "../src/definitions.js";
+import { validateAIResult } from "../src/aiSchemas.js";
 const text = z.string().min(1).max(30000);
 const schemas = {
   layout: z
