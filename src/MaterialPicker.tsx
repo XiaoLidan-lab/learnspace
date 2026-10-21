@@ -22,7 +22,7 @@ export function MaterialPicker({
         附带学习资料 <span>可选</span>
       </h3>
       <p>
-        仅勾选的资料会公开给社区用户查看和下载。不勾选时只发布模块和布局，聊天记录不会附带，笔记可按篇选择。
+        仅勾选的资料会公开给社区用户查看和下载。不勾选时只发布模块配置、布局和学习材料预设。聊天记录不会附带，笔记可按篇选择。
       </p>
       {!candidates.length ? (
         <div className="material-empty">此工作台没有可附带的学习资料。</div>
@@ -125,7 +125,9 @@ export function SharedMaterialList({
   return !materials.length ? null : (
     <section className="shared-material-list">
       <h3>附带 {materials.length} 项学习资料</h3>
-      <p>安装后会将以下资料一并保存到此设备。</p>
+      <p>
+        安装后会将以下资料一并保存到此设备。指定笔记、选区和检索关键词仍需在学习材料中重新选择。
+      </p>
       <ul>
         {materials.map((m, i) => (
           <li key={i}>

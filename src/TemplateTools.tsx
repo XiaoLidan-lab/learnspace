@@ -150,12 +150,13 @@ export function TemplateContents({ template: t }: { template: Template }) {
           {t.connections?.length ? "和学习材料预设" : ""}。
         </p>
         <p>
-          <strong>不会保存</strong>上传文件、笔记正文、学习记录与账号信息。
+          <strong>不会自动附带</strong>
+          上传文件、笔记正文、学习记录与账号信息。社区附带资料以公开清单为准。
         </p>
       </div>
       {needsSources && (
         <p className="template-source-notice">
-          使用模板时，需要重新选择 PDF、笔记等私人来源。
+          未附带的文件，以及指定笔记、选区和检索关键词，需要使用时重新选择。
         </p>
       )}
       <p className="template-independent-note">

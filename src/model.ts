@@ -290,6 +290,18 @@ export function safeTemplate(w: Workspace): Template {
                 w.modules.some((m) => m.id === e.source.moduleId) &&
                 w.modules.some((m) => m.id === e.target.moduleId),
             )
+            // Private note/item IDs are omitted below. Multiple selections from
+            // the same output become one unresolved preset, not duplicate edges.
+            .filter(
+              (e, index, edges) =>
+                edges.findIndex(
+                  (other) =>
+                    other.source.moduleId === e.source.moduleId &&
+                    other.source.port === e.source.port &&
+                    other.target.moduleId === e.target.moduleId &&
+                    other.target.field === e.target.field,
+                ) === index,
+            )
             .map((e, i) => ({
               id: `c${i + 1}`,
               source: {

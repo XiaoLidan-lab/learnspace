@@ -2634,19 +2634,6 @@ function Modal({
         title: title || w.title,
         description,
       });
-      if (
-        template.connections?.some(
-          (e) =>
-            !["text", "selection", "output", "note", "retrieval"].includes(
-              e.source.port,
-            ) ||
-            template.modules.find((m) => m.instanceId === e.target.moduleId)
-              ?.type !== "custom-ai",
-        )
-      )
-        throw Error(
-          "社区暂不支持扩展的数据流模板，请先保存或导出到本地。工作台云端同步不受影响。",
-        );
       const templateId = uid();
       const materials = await uploadMaterials(
         supabase,
@@ -2654,7 +2641,7 @@ function Modal({
         templateId,
         template,
         candidates,
-        template.version === 2 ? [] : selectedMaterials,
+        selectedMaterials,
         uploadedPaths,
       );
       const { error } = await supabase.from("templates").insert({
@@ -2678,7 +2665,7 @@ function Modal({
           ["23514", "P0001", "42703"].includes(error.code)
         )
           throw Error(
-            "社区尚未启用 V2 组合模板，请执行 server/migrations/007_combination_templates.sql 后重试",
+            "社区发布服务尚未更新，或模板未通过安全校验。请联系管理员检查；本次未发布成功。",
           );
         if (
           materials.length &&
@@ -3428,7 +3415,7 @@ function Modal({
             <div className="privacy-line">
               <ShieldCheck size={15} />
               组合模板公开配置、Prompt
-              和连接结构；不携带运行内容。旧版布局模板仍可显式选择附带资料。
+              和学习材料预设；聊天与 AI 运行记录不会附带。只有下方勾选的资料和笔记会公开。
             </div>
             {publishWorkspace && (
               <TemplateContents template={safeTemplate(publishWorkspace)} />
@@ -3444,8 +3431,7 @@ function Modal({
                 Key，并同意公开
               </label>
             )}
-            {!publishWorkspace?.modules.some((m) => m.type === "custom-ai") &&
-              !publishWorkspace?.connections?.length && (
+            {publishWorkspace && (
                 <MaterialPicker
                   candidates={candidates}
                   selected={selectedMaterials}

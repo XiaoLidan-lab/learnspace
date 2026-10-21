@@ -163,40 +163,27 @@ test("V1 继续安装；V2 拒绝私人字段、未知版本、无效端点、�
     },
   ];
   assert(!templateSchema.safeParse(cyclic).success);
-  assert.throws(
-    () =>
-      validateMaterialBindings(t, [
-        {
-          moduleIndex: 1,
-          kind: "note",
-          name: "note",
-          text: "private",
-          noteIndex: 0,
-        },
-      ]),
-    /不能附带/,
-  );
+  const selectedNote = {
+    moduleIndex: 1,
+    kind: "note" as const,
+    name: "Explicitly selected note",
+    text: "shared note",
+    noteIndex: 0,
+  };
+  assert.deepEqual(validateMaterialBindings(t, [selectedNote]), [selectedNote]);
   let calls = 0;
-  await assert.rejects(
-    attachMaterials(
-      fromTemplate(t),
-      t,
-      [
-        {
-          moduleIndex: 1,
-          kind: "note",
-          name: "note",
-          text: "private",
-          noteIndex: 0,
-        },
-      ],
-      async () => {
-        calls++;
-        return new Blob();
-      },
-    ),
-    /不能附带/,
+  const installed = await attachMaterials(
+    fromTemplate(t),
+    t,
+    [selectedNote],
+    async () => {
+      calls++;
+      return new Blob();
+    },
   );
+  assert.equal(installed.notes.length, 1);
+  assert.equal(installed.notes[0].content, "shared note");
+  assert.equal(installed.workspace.connections![1].source.needsBinding, true);
   assert.equal(calls, 0);
 });
 test("社区 V2 SQL 可重跑，兼容 V1，拒绝私人内容和非法图结构", async () => {

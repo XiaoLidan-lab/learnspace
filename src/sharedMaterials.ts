@@ -193,8 +193,6 @@ export function validateMaterialBindings(
   materials: unknown,
 ): SharedMaterial[] {
   const parsed = sharedMaterialsSchema.parse(materials);
-  if (template.version === 2 && parsed.length)
-    throw Error("V2 组合模板不能附带私人资料和笔记，请安装后重新绑定");
   for (const m of parsed) {
     const type = template.modules[m.moduleIndex]?.type;
     if (m.kind === "file" && !["pdf", "image", "video"].includes(type))
@@ -262,6 +260,33 @@ export async function attachMaterials(
         content: material.text,
         sources: [],
       });
+  }
+  // Only rebind module-wide sources whose explicitly shared material is present.
+  // A shared note is not evidence of the author's original selected note; keep
+  // note, selection, item and retrieval bindings unresolved for user review.
+  for (const edge of workspace.connections || []) {
+    if (!edge.source.needsBinding) continue;
+    const index = workspace.modules.findIndex(
+      (m) => m.id === edge.source.moduleId,
+    );
+    const port = edge.source.port;
+    const kind =
+      port === "selection" && edge.source.range === "document"
+        ? "file"
+        : port === "document" || port === "image_ref"
+          ? "file"
+          : port === "web_url"
+            ? "url"
+            : undefined;
+    const bound =
+      kind && selected.some((m) => m.moduleIndex === index && m.kind === kind);
+    const videoBound =
+      port === "video_ref" &&
+      selected.some(
+        (m) =>
+          m.moduleIndex === index && (m.kind === "file" || m.kind === "url"),
+      );
+    if (bound || videoBound) delete edge.source.needsBinding;
   }
   return { workspace, resources, notes };
 }
