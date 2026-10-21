@@ -1,5 +1,6 @@
 import { readTextStream } from "./eventStream";
 import { readAIResponse } from "./apiResponse";
+import { createSharedRequests } from "./sharedRequests";
 import { createClient } from "@supabase/supabase-js";
 export const supabase =
   import.meta.env?.VITE_SUPABASE_URL && import.meta.env?.VITE_SUPABASE_ANON_KEY
@@ -9,6 +10,7 @@ export const supabase =
       )
     : null;
 let nextDigestAt = 0;
+const sharedDigest = createSharedRequests<unknown>();
 async function documentRequestSlot(signal?: AbortSignal) {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const delay = Math.max(0, nextDigestAt - Date.now());
@@ -33,11 +35,30 @@ export async function ai(
   signal?: AbortSignal,
   onText?: (text: string) => void,
 ) {
-  // Client pacing improves long-document UX; the database remains the quota authority.
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const session = (await supabase?.auth.getSession())?.data.session;
+  const token = session?.access_token;
+  if (!session || !token) throw Error("请先登录后使用 AI 服务");
+  if (action === "documentDigest") {
+    // Different modules can analyze the same file concurrently without sending
+    // duplicate digest requests. Never share across authenticated accounts.
+    return sharedDigest(
+      JSON.stringify([session.user.id, payload]),
+      sharedSignal => requestAI(action, payload, token, sharedSignal),
+      signal,
+    );
+  }
+  return requestAI(action, payload, token, signal, onText);
+}
+async function requestAI(
+  action: string,
+  payload: unknown,
+  token: string,
+  signal?: AbortSignal,
+  onText?: (text: string) => void,
+) {
+  // Pace actual requests, not subscribers. Database limits remain authoritative.
   if (action === "documentDigest") await documentRequestSlot(signal);
-  const session = await supabase?.auth.getSession();
-  const token = session?.data.session?.access_token;
-  if (!token) throw Error("请先登录后使用 AI 服务");
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");

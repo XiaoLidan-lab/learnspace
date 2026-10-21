@@ -9,6 +9,11 @@ import type {
 } from "./model";
 import type { WorkspaceBus } from "./events";
 export type ModuleProps = {
+  generation?: {
+    tasks: import("./generationTasks").GenerationTasks;
+    owner: string;
+    read: () => { mod: Mod; ctx: import("./connections").ReadContext } | undefined;
+  };
   mod: Mod;
   workspace: import("./model").Workspace;
   setConnections: (edges: import("./connections").Connection[]) => void;

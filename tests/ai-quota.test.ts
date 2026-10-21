@@ -640,6 +640,37 @@ test("user daily and global daily budgets independently reject before creating a
   }
 });
 
+test("personal budget policy removes the extra daily ceiling without resetting usage or global protection", async () => {
+  const { db, call } = await fixture();
+  try {
+    const first = crypto.randomUUID();
+    assert((await call("begin", first, user, 490000)).allowed);
+    await call("finish", first);
+    const adjustment = await readFile(
+      new URL("../server/migrations/010_ai_personal_budget.sql", import.meta.url),
+      "utf8",
+    );
+    await db.exec(adjustment);
+    await db.exec(adjustment);
+    const next = crypto.randomUUID();
+    assert((await call("begin", next, user, 1510000)).allowed);
+    await call("finish", next);
+    assert.equal((await call("begin", crypto.randomUUID(), other, 1)).code, "BUDGET");
+    const { rows } = await db.query<{ used: number }>(
+      "select used::int from public.ai_quota_counters where bucket='global:total' and period=0",
+    );
+    assert.equal(rows[0].used, 2000000);
+    const policy = await db.query<{ global_total_units: string; user_concurrency: number; requests_per_minute: number }>(
+      "select global_total_units::text, user_concurrency, requests_per_minute from public.ai_quota_policy",
+    );
+    assert.equal(policy.rows[0].global_total_units, "20000000");
+    assert.equal(policy.rows[0].user_concurrency, 1);
+    assert.equal(policy.rows[0].requests_per_minute, 15);
+  } finally {
+    await db.close();
+  }
+});
+
 test("client disconnect aborts the provider signal and preserves protective quota lease", async () => {
   const { db, quota } = await fixture();
   let entered!: () => void, stopped!: () => void;

@@ -1,4 +1,6 @@
 import { useDialogFocus } from "./useDialogFocus";
+import { GenerationTasks } from "./generationTasks";
+import { readGenerationTarget } from "./generationTarget";
 import { hasEditedDraft } from "./learningPresentation";
 import { chooseMaterials, learningMaterials } from "./learningMaterials";
 import { isUtilityTool } from "./utilityTools";
@@ -285,6 +287,15 @@ function App() {
   const journal = useMemo(() => createDraftJournal(() => localStorage, uid()), []);
   const latestLocal = useRef({ workspaces, notes });
   latestLocal.current = { workspaces, notes };
+  const generationTasks = useMemo(() => new GenerationTasks(), []);
+  const generationLatest = useRef({ workspaces, notes, resources, owner: session?.user.id, blocked: localConflict });
+  generationLatest.current = { workspaces, notes, resources, owner: session?.user.id, blocked: localConflict };
+  useEffect(() => { generationTasks.reconcile(); }, [generationTasks, workspaces, notes, resources, session?.user.id, localConflict]);
+  useEffect(() => () => generationTasks.dispose(), [generationTasks]);
+  useEffect(() => {
+    if (page !== "editor" && generationTasks.hasRunning())
+      notify("导图或测验正在后台生成，返回原工作台可查看进度；请保持网站页面打开。");
+  }, [page, generationTasks]);
   function retainLocalDraft() {
     try {
       return journal.retain(latestLocal.current.workspaces, latestLocal.current.notes);
@@ -2153,6 +2164,16 @@ function App() {
                 ai={() => setDialog({ kind: "ai", adjust: true })}
                 moduleProps={(m) => ({
                   mod: m,
+                  generation: {
+                    tasks: generationTasks,
+                    owner: session?.user.id || "local",
+                    read: () => readGenerationTarget(generationLatest.current, {
+                      owner: session?.user.id,
+                      workspaceId: currentId,
+                      taskId: taskScope,
+                      moduleId: m.id,
+                    }),
+                  },
                   workspace: current,
                   setConnections,
                   taskId: taskScope,

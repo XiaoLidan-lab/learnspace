@@ -297,7 +297,7 @@ export function CardsModule(p: ModuleProps) {
             onClick={() => setFlipped((v) => !v)}
           >
             <span>{flipped ? "答案" : "问题"}</span>
-            <div>{flipped ? card.back : card.front}</div>
+            <div><MathText>{flipped ? card.back : card.front}</MathText></div>
             <small>{flipped ? "点击返回问题" : "想好答案后，点击翻面"}</small>
           </button>
           <div className="card-study-navigation">
@@ -340,8 +340,8 @@ export function CardsModule(p: ModuleProps) {
                 }}
               >
                 <span>{i + 1}</span>
-                <strong>{c.front}</strong>
-                <small>{c.back.slice(0, 160)}</small>
+                <strong><MathText>{c.front}</MathText></strong>
+                <small><MathText>{c.back}</MathText></small>
               </button>
               <ActionMenu label={`卡片 ${i + 1} 操作`}>
                 <button onClick={() => edit(c.id)}>编辑</button>

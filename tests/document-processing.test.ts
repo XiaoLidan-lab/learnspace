@@ -16,6 +16,7 @@ import { flowStateSchema } from "../src/flowSchema";
 import { cloudPayload, parseCloudPayload } from "../src/cloudData";
 import { directConnection } from "../src/connectionGraph";
 import { uid, type Mod, type Resource, type Workspace } from "../src/model";
+import { createSharedRequests } from "../src/sharedRequests";
 Object.defineProperty(globalThis, "crypto", { value: webcrypto });
 async function fixture(texts: string[], type: Mod["type"] = "mindmap") {
   const resource: Resource = {
@@ -79,6 +80,32 @@ async function fixture(texts: string[], type: Mod["type"] = "mindmap") {
     edge,
   };
 }
+test("导图与测验同时分析同一长文档，按分段共享实际请求且分别获得完整材料", { timeout: 5000 }, async () => {
+  const f = await fixture(Array.from({ length: 6 }, (_, i) => `CODE-${i + 1} ` + "正文知识 ".repeat(850)));
+  const share = createSharedRequests<string>();
+  const gates = new Map<string, { count: number; ready: Promise<void>; release: () => void }>();
+  let calls = 0;
+  const call = (_action: string, payload: any, signal?: AbortSignal) => {
+    const key = JSON.stringify(["same-user", payload]);
+    let gate = gates.get(key);
+    if (!gate) {
+      let release!: () => void;
+      const ready = new Promise<void>(resolve => { release = resolve; });
+      gate = { count: 0, ready, release }; gates.set(key, gate);
+    }
+    if (++gate.count === 2) gate.release();
+    const current = gate;
+    return share(key, async () => { await current.ready; calls++; return `要点：${payload.text.match(/CODE-\d+/)?.[0]}`; }, signal);
+  };
+  const map = createDocumentReader({ ctx: f.ctx, targetId: f.target.id, budget: 16000, call });
+  const quiz = createDocumentReader({ ctx: f.ctx, targetId: "quiz-module", budget: 16000, call });
+  const [mapInput, quizInput] = await Promise.all([map(f.resource, f.source.id), quiz(f.resource, f.source.id)]);
+  assert.equal(calls, 6);
+  for (const input of [mapInput, quizInput]) {
+    assert.match(input.text, /CODE-1/); assert.match(input.text, /CODE-6/);
+    assert.ok(input.sources.length > 0);
+  }
+});
 test("全文分段不丢尾部，短文无需额外 AI，保留原文页码", async () => {
   const f = await fixture(["首段知识", "末段答案 END-739"]);
   const chunks = [];

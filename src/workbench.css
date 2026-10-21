@@ -629,6 +629,9 @@
 }
 .card-collection-open small {
   grid-column: 2;
+  /* Clamp the rendered preview instead of cutting a LaTeX expression in half. */
+  max-height: 4.8em;
+  overflow: hidden;
   font-size: 12px;
   line-height: 1.6;
   color: #8390a5;

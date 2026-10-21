@@ -123,6 +123,17 @@ test("卡片默认呈现一张复习卡和翻面导航，保留集合与新增�
   assert.match(html, /卡片集/);
   assert.ok(!html.includes('aria-label="卡片正面"'));
 });
+test("知识卡片复习渲染 LaTeX，并保留原始内容", () => {
+  const p = props("cards");
+  const text = "防止 $d_k$ 较大，使用 $1/\\sqrt{d_k}$ 缩放。";
+  p.mod.data = { cards: [{ id: "math-card", front: text, back: "答案 $d_k$" }] };
+  const before = JSON.stringify(p.mod.data);
+  const html = renderToStaticMarkup(createElement(CardsModule, p));
+  assert.equal((html.match(/class="katex"/g) || []).length, 2);
+  assert.match(html, /<math/);
+  assert.match(html, /查看卡片答案/);
+  assert.equal(JSON.stringify(p.mod.data), before);
+});
 test("测验答题中不展示出题材料框，提交后可查看错题与制作卡片", () => {
   const p = props("quiz");
   p.mod.data = {

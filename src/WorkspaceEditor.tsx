@@ -23,7 +23,6 @@ import {
   types,
   creatableTypes,
   categories,
-  MAX_MODULES,
   definitions,
   type ModuleType,
 } from "./definitions";
@@ -344,7 +343,7 @@ export function WorkspaceEditor({
             {focus
               ? "专注模式"
               : edit
-                ? `调整布局 · ${modules.length} / ${MAX_MODULES} 个工具`
+                ? `调整布局 · ${modules.length} 个模块`
                 : "学习工作台"}
           </span>
           <div className="canvas-actions">
