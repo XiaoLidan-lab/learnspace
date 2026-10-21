@@ -13,7 +13,7 @@ import { useQuickRun } from "./useQuickRun";
 import { materialEdges, materialModePatch } from "./learningMaterials";
 import { useMaterialAI } from "./useMaterialAI";
 import { prepareChatContext } from "./chatContext";
-import { noteTitle, titledTranslation } from "./noteContent";
+import { noteDisplayContent, noteTitle, titledTranslation } from "./noteContent";
 import { MarkdownContent } from "./MarkdownContent";
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useRef } from "react";
 import {
@@ -381,7 +381,7 @@ export function LegacyBody(props: ModuleProps) {
         )}
         {noteView === "preview" && note?.content ? (
           <div className="note-preview">
-            <MarkdownContent>{note.content}</MarkdownContent>
+            <MarkdownContent>{noteDisplayContent(note.content)}</MarkdownContent>
           </div>
         ) : (
           <textarea
