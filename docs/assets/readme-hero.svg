@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="380" viewBox="0 0 1280 380" role="img" aria-labelledby="title description">
+  <title id="title">LearnSpace — 让学习围绕你展开</title>
+  <desc id="description">把阅读、AI 理解和笔记复习组织在同一个学习空间。右侧为阅读、理解、沉淀的概念图，不是产品截图。</desc>
+  <rect x="1" y="1" width="1278" height="378" rx="24" fill="#f7f8fb" stroke="#dde3ed"/>
+  <g font-family="Arial, 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <rect x="54" y="49" width="44" height="44" rx="12" fill="#4257d6"/>
+    <g fill="none" stroke="#fff" stroke-width="2.4" stroke-linejoin="round">
+      <rect x="64" y="59" width="24" height="24" rx="3"/>
+      <path d="M64 67h24M73 67v16"/>
+    </g>
+    <text x="112" y="80" font-size="26" font-weight="700" fill="#202637" letter-spacing="-.6">LearnSpace.</text>
+    <text x="54" y="159" font-size="44" font-weight="700" fill="#202637">让学习围绕你展开。</text>
+    <text x="55" y="208" font-size="22" fill="#3e4c63">阅读、理解、复习，都在一个空间里。</text>
+    <text x="55" y="249" font-size="17" fill="#606d82">自由组合工具，让资料、AI 和你的思考留在一起。</text>
+    <rect x="54" y="294" width="122" height="34" rx="8" fill="#eef1ff"/>
+    <text x="115" y="316" text-anchor="middle" font-size="14" font-weight="600" fill="#4257d6">本地优先</text>
+    <text x="193" y="316" font-size="14" fill="#606d82">YOUR SPACE. YOUR PACE.</text>
+    <path d="M757 112v74h245v66" fill="none" stroke="#bec7ed" stroke-width="2"/>
+    <rect x="681" y="52" width="220" height="112" rx="14" fill="#fff" stroke="#dde3ed"/>
+    <rect x="700" y="72" width="32" height="32" rx="8" fill="#eef1ff"/>
+    <text x="716" y="94" text-anchor="middle" font-size="14" font-weight="700" fill="#4257d6">01</text>
+    <text x="746" y="94" font-size="18" font-weight="700" fill="#202637">阅读材料</text>
+    <text x="701" y="137" font-size="14" fill="#606d82">论文 / 课程 / 网页与视频</text>
+    <rect x="957" y="109" width="264" height="112" rx="14" fill="#4257d6"/>
+    <rect x="976" y="129" width="32" height="32" rx="8" fill="#fff"/>
+    <text x="992" y="151" text-anchor="middle" font-size="14" font-weight="700" fill="#4257d6">02</text>
+    <text x="1022" y="151" font-size="18" font-weight="700" fill="#fff">和 AI 一起理解</text>
+    <text x="977" y="194" font-size="14" fill="#fff">翻译 / 问答 / 梳理知识</text>
+    <rect x="757" y="252" width="304" height="94" rx="14" fill="#fff" stroke="#dde3ed"/>
+    <rect x="776" y="272" width="32" height="32" rx="8" fill="#eef7f2"/>
+    <text x="792" y="294" text-anchor="middle" font-size="14" font-weight="700" fill="#287057">03</text>
+    <text x="822" y="294" font-size="18" font-weight="700" fill="#202637">沉淀自己的知识</text>
+    <text x="777" y="327" font-size="14" fill="#606d82">笔记 / 卡片 / 测验练习</text>
+  </g>
+</svg>
