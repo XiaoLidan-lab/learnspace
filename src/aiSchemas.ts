@@ -58,13 +58,9 @@ export const quizSchema = z
       .array(
         z
           .object({
-            type: z.enum(["choice", "short"]),
+            type: z.literal("choice"),
             question: z.string().min(1).max(1000),
-            options: z
-              .array(z.string().min(1).max(500))
-              .min(2)
-              .max(6)
-              .optional(),
+            options: z.array(z.string().trim().min(1).max(500)).min(2).max(6),
             answer: z.string().min(1).max(3000),
             explanation: z.string().max(5000),
           })
@@ -76,11 +72,15 @@ export const quizSchema = z
   .strict()
   .superRefine((v, c) =>
     v.questions.forEach((q) => {
-      if (q.type === "choice" && (!q.options || !q.options.includes(q.answer)))
+      if (!q.options.includes(q.answer))
         c.addIssue({ code: "custom", message: "选择题答案必须属于选项" });
+      if (new Set(q.options.map((o) => o.trim())).size !== q.options.length)
+        c.addIssue({ code: "custom", message: "选择题选项不能重复" });
     }),
   );
 export function validateAIResult(action: string, content: string) {
+  if (action === "documentDigest")
+    return z.string().trim().min(1).max(1800).parse(content);
   if (content.length > 100000) throw Error("模型返回内容过大");
   if (action === "layout") return validateLayoutPlan(JSON.parse(content));
   if (action === "cards") return cardsSchema.parse(JSON.parse(content));

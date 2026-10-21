@@ -1,3 +1,8 @@
+import { ActionMenu } from "./ActionMenu";
+import { LayoutPicker } from "./LayoutPicker";
+import { UtilityDock } from "./UtilityDock";
+import { isUtilityTool } from "./utilityTools";
+import { withTextPresentation } from "./textPresentation";
 import { useEffect, useRef, useState } from "react";
 import {
   Search,
@@ -10,14 +15,13 @@ import {
   Unlock,
   Maximize2,
   Minimize2,
-  Columns2,
-  Layers,
   Split,
   X,
   Pencil,
 } from "lucide-react";
 import {
   types,
+  creatableTypes,
   categories,
   MAX_MODULES,
   definitions,
@@ -27,14 +31,7 @@ import { registry, ModuleIcon } from "./registry";
 import { ModuleBody } from "./ModuleBody";
 import type { Mod, Workspace } from "./model";
 import type { ModuleProps } from "./moduleProps";
-import {
-  arrange,
-  canPlace,
-  stackModules,
-  unstack,
-  splitModules,
-  type LayoutPreset,
-} from "./layout";
+import { arrange, canPlace, unstack } from "./layout";
 type Props = {
   workspace: Workspace;
   edit: boolean;
@@ -44,6 +41,7 @@ type Props = {
   moduleProps: (mod: Mod) => ModuleProps;
   notify: (s: string) => void;
   ai: () => void;
+  openModuleLibrary: () => void;
 };
 export function WorkspaceEditor({
   workspace,
@@ -54,7 +52,9 @@ export function WorkspaceEditor({
   moduleProps,
   notify,
   ai,
+  openModuleLibrary,
 }: Props) {
+  const connectionMode = false;
   const [query, setQuery] = useState(""),
     [category, setCategory] = useState("全部"),
     [focus, setFocus] = useState<string>(),
@@ -68,16 +68,11 @@ export function WorkspaceEditor({
       type: ModuleType;
       layout: Mod["layout"];
       valid: boolean;
-    }>(),
-    [operation, setOperation] = useState<{
-      id: string;
-      kind: "stack" | "split";
-    }>(),
-    [target, setTarget] = useState(""),
-    [side, setSide] = useState<"左" | "右" | "上" | "下">("右");
+    }>();
   const grid = useRef<HTMLDivElement>(null),
     draggedType = useRef<ModuleType>("pdf");
   const modules = workspace.modules;
+  const canvasModules = modules.filter((m) => !isUtilityTool(m.type));
   const bus = moduleProps(
     modules[0] || {
       id: "",
@@ -89,7 +84,6 @@ export function WorkspaceEditor({
   useEffect(() => {
     setFocus(undefined);
     setTabs({});
-    setOperation(undefined);
     setDropping(undefined);
     setDrag(undefined);
   }, [workspace.id]);
@@ -97,8 +91,31 @@ export function WorkspaceEditor({
     () =>
       bus.on("module.focus", ({ moduleId }) => {
         const mod = modules.find((m) => m.id === moduleId);
+        if (mod && isUtilityTool(mod.type)) {
+          setFocus(undefined);
+          return;
+        }
         if (mod?.group) setTabs((t) => ({ ...t, [mod.group!]: mod.id }));
         setFocus(moduleId);
+      }),
+    [bus, modules],
+  );
+  useEffect(
+    () =>
+      bus.on("module.reveal", ({ moduleId }) => {
+        const mod = modules.find((m) => m.id === moduleId);
+        if (mod?.group) setTabs((t) => ({ ...t, [mod.group!]: mod.id }));
+        setFocus(undefined);
+        requestAnimationFrame(() => {
+          const element = Array.from(
+            document.querySelectorAll<HTMLElement>("[data-module-id]"),
+          ).find((item) => item.dataset.moduleId === moduleId);
+          element?.scrollIntoView({
+            behavior: "smooth",
+            block: "nearest",
+            inline: "nearest",
+          });
+        });
       }),
     [bus, modules],
   );
@@ -109,15 +126,16 @@ export function WorkspaceEditor({
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
   }, []);
-  const visible = types.filter(
+  const visible = creatableTypes.filter(
     (t) =>
+      t !== "custom-ai" &&
       (category === "全部" || definitions[t].category === category) &&
       (definitions[t].name + definitions[t].description)
         .toLowerCase()
         .includes(query.toLowerCase()),
   );
   const otherModules = drag
-    ? modules.filter(
+    ? canvasModules.filter(
         (m) =>
           m.id !== drag.id &&
           (!m.group ||
@@ -140,7 +158,8 @@ export function WorkspaceEditor({
     : [];
   const active = (m: Mod) =>
     !m.group ||
-    (tabs[m.group] || modules.find((x) => x.group === m.group)?.id) === m.id;
+    (tabs[m.group] || canvasModules.find((x) => x.group === m.group)?.id) ===
+      m.id;
   function updateLayout(m: Mod, layout: Mod["layout"]) {
     return modules.map((x) =>
       x.id === m.id || (m.group && x.group === m.group)
@@ -151,6 +170,7 @@ export function WorkspaceEditor({
   function pointer(e: React.PointerEvent, m: Mod, resize = false) {
     if (
       !edit ||
+      connectionMode ||
       m.locked ||
       !grid.current ||
       window.matchMedia("(max-width:700px)").matches
@@ -180,7 +200,7 @@ export function WorkspaceEditor({
       setDrag({
         id: m.id,
         layout: proposed,
-        valid: canPlace(modules, m.id, proposed),
+        valid: canPlace(canvasModules, m.id, proposed),
       });
     };
     const finish = (cancel = false) => {
@@ -189,7 +209,7 @@ export function WorkspaceEditor({
       element.removeEventListener("pointercancel", cancelled);
       setDrag(undefined);
       if (cancel) return;
-      if (!canPlace(modules, m.id, proposed))
+      if (!canPlace(canvasModules, m.id, proposed))
         return notify("位置已有模块，请选择空白区域");
       if (JSON.stringify(proposed) !== JSON.stringify(m.layout))
         change(updateLayout(m, proposed));
@@ -203,7 +223,7 @@ export function WorkspaceEditor({
   function drop(e: React.DragEvent) {
     e.preventDefault();
     const type = e.dataTransfer.getData("application/learnspace") as ModuleType;
-    if (edit && types.includes(type)) {
+    if (edit && !connectionMode && types.includes(type)) {
       if (dropping && !dropping.valid) notify("此位置已有模块");
       else add(type, dropping?.layout);
     }
@@ -215,7 +235,9 @@ export function WorkspaceEditor({
         <aside className="module-library expanded-library">
           <div className="library-heading">
             <h3>模块库</h3>
-            <span>{types.length}</span>
+            <span>
+              {creatableTypes.filter((t) => t !== "custom-ai").length}
+            </span>
           </div>
           <p className="library-description">拖入画布，或点击添加</p>
           <div className="search-field">
@@ -249,7 +271,7 @@ export function WorkspaceEditor({
                       <button
                         className="library-module"
                         key={type}
-                        draggable
+                        draggable={!isUtilityTool(type)}
                         onDragStart={(e) => {
                           draggedType.current = type;
                           e.dataTransfer.setData(
@@ -278,9 +300,13 @@ export function WorkspaceEditor({
         </aside>
       )}
       <div
-        className={`canvas-area ${edit ? "editing" : ""} ${focus ? "focus-canvas" : ""}`}
+        className={`canvas-area ${edit ? "editing" : ""} ${focus ? "focus-canvas" : ""} ${connectionMode ? "connecting" : ""}`}
         onDragOver={(e) => {
-          if (!edit || !e.dataTransfer.types.includes("application/learnspace"))
+          if (
+            !edit ||
+            connectionMode ||
+            !e.dataTransfer.types.includes("application/learnspace")
+          )
             return;
           e.preventDefault();
           if (!grid.current) return;
@@ -304,7 +330,7 @@ export function WorkspaceEditor({
           setDropping({
             type,
             layout,
-            valid: canPlace(modules, "new", layout),
+            valid: canPlace(canvasModules, "new", layout),
           });
         }}
         onDragLeave={(e) => {
@@ -315,109 +341,49 @@ export function WorkspaceEditor({
       >
         <div className="canvas-status">
           <span>
-            {focus ? "专注模式" : edit ? "搭建模式" : "专注学习"} ·{" "}
-            {modules.length} / {MAX_MODULES} 个模块
+            {focus
+              ? "专注模式"
+              : edit
+                ? `调整布局 · ${modules.length} / ${MAX_MODULES} 个工具`
+                : "学习工作台"}
           </span>
-          {focus ? (
-            <button className="btn mini" onClick={() => setFocus(undefined)}>
-              <Minimize2 size={13} />
-              退出专注 · Esc
-            </button>
-          ) : edit ? (
-            <div className="layout-presets">
-              <label>
-                <Columns2 size={14} />
-                <select
-                  aria-label="一键布局"
-                  value=""
-                  onChange={(e) => {
-                    if (e.target.value) {
-                      if (
-                        modules.some((m) => m.locked) &&
-                        !confirm(
-                          "布局切换将排列所有模块，包括已锁定模块，继续？",
-                        )
-                      )
-                        return;
-                      change(arrange(modules, e.target.value as LayoutPreset));
+          <div className="canvas-actions">
+            {focus ? (
+              <button className="btn mini" onClick={() => setFocus(undefined)}>
+                <Minimize2 size={13} />
+                退出专注 · Esc
+              </button>
+            ) : edit ? (
+              <div className="layout-presets">
+                <LayoutPicker
+                  apply={(preset) => {
+                    if (
+                      modules.some((m) => m.locked) &&
+                      !confirm("布局切换将排列所有模块，包括已锁定模块，继续？")
+                    )
+                      return false;
+                    try {
+                      change(arrange(modules, preset));
+                      notify(`已应用${preset}布局，可撤销恢复`);
+                      return true;
+                    } catch (e) {
+                      notify(e instanceof Error ? e.message : "布局调整失败");
+                      return false;
                     }
                   }}
-                >
-                  <option value="">一键布局</option>
-                  {["双栏", "三栏", "四宫格", "主次", "自适应"].map((x) => (
-                    <option key={x}>{x}</option>
-                  ))}
-                </select>
-              </label>
-              <button className="text-button" onClick={ai}>
-                <Sparkles size={13} />
-                AI 调整
-              </button>
-            </div>
-          ) : (
-            <span>双击模块标题进入专注模式</span>
-          )}
-        </div>
-        {operation && (
-          <div className="layout-operation">
-            <b>
-              {operation.kind === "stack"
-                ? "堆叠成标签页"
-                : "将当前模块分屏到目标旁边"}
-            </b>
-            <select
-              aria-label="目标模块"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-            >
-              <option value="">选择目标模块</option>
-              {modules
-                .filter((m) => m.id !== operation.id && !m.locked)
-                .map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.title}
-                  </option>
-                ))}
-            </select>
-            {operation.kind === "split" && (
-              <select
-                aria-label="分屏方向"
-                value={side}
-                onChange={(e) => setSide(e.target.value as typeof side)}
-              >
-                {["左", "右", "上", "下"].map((s) => (
-                  <option key={s}>{s}</option>
-                ))}
-              </select>
+                />
+                <button className="text-button" onClick={ai}>
+                  <Sparkles size={13} />
+                  AI 调整
+                </button>
+              </div>
+            ) : (
+              <span className="canvas-hint">双击模块标题进入专注模式</span>
             )}
-            <button
-              className="btn primary"
-              disabled={!target}
-              onClick={() => {
-                try {
-                  change(
-                    operation.kind === "stack"
-                      ? stackModules(modules, operation.id, target)
-                      : splitModules(modules, operation.id, target, side),
-                  );
-                  setOperation(undefined);
-                } catch (e) {
-                  notify((e as Error).message);
-                }
-              }}
-            >
-              应用
-            </button>
-            <button
-              title="取消排版操作"
-              onClick={() => setOperation(undefined)}
-            >
-              <X size={16} />
-            </button>
           </div>
-        )}
-        {!modules.length ? (
-          <div className="empty-canvas">
+        </div>
+        {!canvasModules.length ? (
+          <div className="empty-canvas" hidden={connectionMode}>
             <div className="canvas-empty-icon">
               <Plus size={34} />
             </div>
@@ -425,7 +391,7 @@ export function WorkspaceEditor({
             <p>从模块库添加工具，自由组合你的学习空间。</p>
             <button className="btn primary" onClick={() => add("pdf")}>
               <Plus size={16} />
-              添加 PDF 阅读器
+              添加文件阅读器
             </button>
           </div>
         ) : (
@@ -433,7 +399,8 @@ export function WorkspaceEditor({
             className="workspace-canvas"
             ref={grid}
             style={{
-              gridTemplateRows: `repeat(${Math.max(12, ...modules.map((m) => m.layout.y + m.layout.h), dropping ? dropping.layout.y + dropping.layout.h : 0) + 2},44px)`,
+              display: connectionMode ? "none" : undefined,
+              gridTemplateRows: `repeat(${Math.max(12, ...canvasModules.map((m) => m.layout.y + m.layout.h), dropping ? dropping.layout.y + dropping.layout.h : 0) + 2},44px)`,
             }}
           >
             {verticalGuides.map((x) => (
@@ -461,8 +428,8 @@ export function WorkspaceEditor({
                 {dropping.valid ? "松开放置" : "此处已有模块"}
               </div>
             )}
-            {modules.map((m) => {
-              const grouped = modules.filter(
+            {canvasModules.map((m) => {
+              const grouped = canvasModules.filter(
                 (x) => x.group && x.group === m.group,
               );
               const moving =
@@ -535,7 +502,7 @@ export function WorkspaceEditor({
                                   : 0),
                           ),
                         };
-                        if (canPlace(modules, m.id, l))
+                        if (canPlace(canvasModules, m.id, l))
                           change(updateLayout(m, l));
                       }}
                     >
@@ -546,84 +513,113 @@ export function WorkspaceEditor({
                     </div>
                     <div className="module-controls">
                       {edit && (
-                        <>
-                          <button
-                            title="修改模块标题"
-                            onClick={() => {
-                              const title = prompt("模块标题", m.title);
-                              if (title?.trim())
+                        <ActionMenu label={`更多模块操作：${m.title}`}>
+                          {(m.type === "text" || m.type === "sticky") && (
+                            <select
+                              className="text-presentation-select"
+                              aria-label={`${m.title}显示方式`}
+                              value={m.type === "sticky" ? "compact" : "normal"}
+                              onChange={(e) =>
                                 change(
                                   modules.map((x) =>
                                     x.id === m.id
-                                      ? { ...x, title: title.slice(0, 80) }
+                                      ? withTextPresentation(
+                                          x,
+                                          e.target.value === "compact",
+                                        )
                                       : x,
                                   ),
-                                );
-                            }}
-                          >
-                            <Pencil size={12} />
-                          </button>
-                          <button
-                            title="复制模块及内容"
-                            onClick={() => duplicate(m)}
-                          >
-                            <Copy size={12} />
-                          </button>
-                          <button
-                            title={m.locked ? "解锁模块" : "锁定模块"}
-                            onClick={() =>
-                              change(
-                                modules.map((x) =>
-                                  x.id === m.id ||
-                                  (m.group && x.group === m.group)
-                                    ? { ...x, locked: !m.locked }
-                                    : x,
-                                ),
-                              )
-                            }
-                          >
-                            {m.locked ? (
-                              <Unlock size={12} />
-                            ) : (
-                              <Lock size={12} />
-                            )}
-                          </button>
-                          <button
-                            title="分屏"
-                            disabled={m.locked}
-                            onClick={() => {
-                              setOperation({ id: m.id, kind: "split" });
-                              setTarget("");
-                            }}
-                          >
-                            <Columns2 size={12} />
-                          </button>
-                          <button
-                            title="堆叠标签页"
-                            disabled={m.locked}
-                            onClick={() => {
-                              setOperation({ id: m.id, kind: "stack" });
-                              setTarget("");
-                            }}
-                          >
-                            <Layers size={12} />
-                          </button>
-                          {m.group && (
-                            <button
-                              title="拆出标签页"
-                              disabled={m.locked}
-                              onClick={() => {
-                                try {
-                                  change(unstack(modules, m.id));
-                                } catch (e) {
-                                  notify((e as Error).message);
-                                }
-                              }}
+                                )
+                              }
                             >
-                              <Split size={12} />
-                            </button>
+                              <option value="normal">普通文本</option>
+                              <option value="compact">便签样式</option>
+                            </select>
                           )}
-                        </>
+                          {edit && (
+                            <>
+                              <button
+                                title="修改模块标题"
+                                onClick={() => {
+                                  const title = prompt("模块标题", m.title);
+                                  if (title?.trim())
+                                    change(
+                                      modules.map((x) =>
+                                        x.id === m.id
+                                          ? { ...x, title: title.slice(0, 80) }
+                                          : x,
+                                      ),
+                                    );
+                                }}
+                              >
+                                <Pencil size={14} />
+                                重命名
+                              </button>
+                              <button
+                                title="复制模块及内容"
+                                onClick={() => duplicate(m)}
+                              >
+                                <Copy size={14} />
+                                复制模块
+                              </button>
+                              <button
+                                title={m.locked ? "解锁模块" : "锁定模块"}
+                                onClick={() =>
+                                  change(
+                                    modules.map((x) =>
+                                      x.id === m.id ||
+                                      (m.group && x.group === m.group)
+                                        ? { ...x, locked: !m.locked }
+                                        : x,
+                                    ),
+                                  )
+                                }
+                              >
+                                {m.locked ? (
+                                  <>
+                                    <Unlock size={14} />
+                                    解锁布局
+                                  </>
+                                ) : (
+                                  <>
+                                    <Lock size={14} />
+                                    锁定布局
+                                  </>
+                                )}
+                              </button>
+                              {m.group && (
+                                <button
+                                  title="拆出标签页"
+                                  disabled={m.locked}
+                                  onClick={() => {
+                                    try {
+                                      change(unstack(modules, m.id));
+                                    } catch (e) {
+                                      notify((e as Error).message);
+                                    }
+                                  }}
+                                >
+                                  <Split size={14} />
+                                  拆出标签页
+                                </button>
+                              )}
+                            </>
+                          )}
+                          <button
+                            title="移除模块"
+                            disabled={m.locked}
+                            onClick={() => {
+                              change(modules.filter((x) => x.id !== m.id));
+                              if (focus === m.id) setFocus(undefined);
+                              notify(
+                                "模块已移除，可撤销恢复；资料和笔记仍保留",
+                              );
+                            }}
+                          >
+                            <X size={14} />
+                            移除模块
+                          </button>
+                        </ActionMenu>
                       )}
                       <button
                         title={focus === m.id ? "退出专注" : "专注模式"}
@@ -637,21 +633,6 @@ export function WorkspaceEditor({
                           <Maximize2 size={13} />
                         )}
                       </button>
-                      {edit && (
-                        <button
-                          title="删除模块"
-                          disabled={m.locked}
-                          onClick={() => {
-                            change(modules.filter((x) => x.id !== m.id));
-                            if (focus === m.id) setFocus(undefined);
-                            notify(
-                              "模块已移除，可撤销恢复；共享资料和笔记仍保留",
-                            );
-                          }}
-                        >
-                          <X size={13} />
-                        </button>
-                      )}
                     </div>
                   </header>
                   {m.group && (
@@ -674,7 +655,7 @@ export function WorkspaceEditor({
                   <div className="module-body">
                     <ModuleBody {...moduleProps(m)} />
                   </div>
-                  {edit && !m.locked && !focus && (
+                  {edit && !connectionMode && !m.locked && !focus && (
                     <button
                       className="resize-handle"
                       title="拖动调整模块大小"
@@ -689,6 +670,14 @@ export function WorkspaceEditor({
           </div>
         )}
       </div>
+      <UtilityDock
+        modules={modules}
+        moduleProps={moduleProps}
+        bus={bus}
+        edit={edit}
+        remove={(id) => change(modules.filter((m) => m.id !== id))}
+        notify={notify}
+      />
     </div>
   );
 }

@@ -13,7 +13,7 @@ import {
   type Workspace,
 } from "../src/model";
 import { arrange } from "../src/layout";
-test("IndexedDB 集成：16 种模块、内容、分组、笔记和 Blob 保存恢复", async () => {
+test("IndexedDB 集成：17 种模块、内容、分组、笔记和 Blob 保存恢复", async () => {
   const modules: Mod[] = types.map((type) => ({
     id: uid(),
     type,
@@ -59,7 +59,7 @@ test("IndexedDB 集成：16 种模块、内容、分组、笔记和 Blob 保存�
   await store.saveResource(resource);
   await store.saveNote(note);
   const restored = (await store.workspaces()).find((w) => w.id === id)!;
-  assert.equal(restored.modules.length, 16);
+  assert.equal(restored.modules.length, 17);
   assert.deepEqual(
     restored.modules.map((m) => m.data),
     workspace.modules.map((m) => m.data),

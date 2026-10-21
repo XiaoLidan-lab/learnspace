@@ -1,3 +1,33 @@
+import { useDialogFocus } from "./useDialogFocus";
+import { hasEditedDraft } from "./learningPresentation";
+import { chooseMaterials, learningMaterials } from "./learningMaterials";
+import { isUtilityTool } from "./utilityTools";
+import { prepareReadingFile } from "./fileReading";
+import { CustomModuleLibrary } from "./CustomModuleLibrary";
+import { instantiateCustomModule } from "./customModuleStore";
+import { connectionError, type Connection } from "./connections";
+import {
+  copiedCustomInputs,
+  customConfigSchema,
+  defaultCustomConfig,
+  customEvidence,
+  type CustomConfig,
+} from "./customAI";
+import { lazy, Suspense, useEffect, useRef, useState, useMemo } from "react";
+const CloudPanel = lazy(() =>
+  import("./CloudPanel").then((m) => ({ default: m.CloudPanel })),
+);
+import { useCloudSync } from "./useCloudSync";
+import { PlanEditor } from "./PlanEditor";
+import {
+  projectWorkspace,
+  scopedNotes,
+  updateModule,
+  changeStructure,
+  migrateTaskContent,
+} from "./tasks";
+import { appendNote, noteTitle, receivingNote, selectionKind } from "./noteContent";
+import type { ContentKind } from "./model";
 import { layoutResultSchema, type LayoutPlanning } from "./layoutPlan";
 import {
   materialCandidates,
@@ -8,7 +38,6 @@ import {
 } from "./sharedMaterials";
 import { uploadMaterials } from "./materialService";
 import { MaterialPicker, SharedMaterialList } from "./MaterialPicker";
-import { useEffect, useRef, useState, useMemo } from "react";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -53,7 +82,13 @@ import { WorkspaceEditor } from "./WorkspaceEditor";
 import { ModuleIcon as MIcon } from "./registry";
 import { definitions, MAX_MODULES } from "./definitions";
 import { WorkspaceBus } from "./events";
-import { nextPosition, applyPlan, restoreStructure, arrange } from "./layout";
+import {
+  nextPosition,
+  applyPlan,
+  restoreStructure,
+  arrange,
+  parkUtilityModules,
+} from "./layout";
 import {
   builtins,
   fromTemplate,
@@ -71,7 +106,13 @@ import {
   type Template,
   type Workspace,
 } from "./model";
-import { store } from "./storage";
+import { store, LocalConflictError } from "./storage";
+import { createDraftJournal } from "./localDrafts";
+import {
+  TemplateSaveDialog,
+  TemplateLibrary,
+  TemplateContents,
+} from "./TemplateTools";
 import { ai, supabase } from "./services";
 import {
   authCallbackError,
@@ -91,7 +132,7 @@ function MiniPreview({
     9,
   );
   return (
-    <div className={`mini-preview ${large ? "large" : ""}`}>
+    <div className={`mini-preview ${large ? "large" : ""}`} aria-hidden="true">
       <div className="mini-dots" />
       <div className="mini-grid">
         {template.modules.map((m, i) => (
@@ -183,8 +224,11 @@ type Dialog =
       text: string;
       source?: Source;
       targets: Mod[];
+      contentKind?: ContentKind;
+      material?: { moduleId: string; range: "selection" | "document" };
     };
 function App() {
+  const [moduleLibraryOpen, setModuleLibraryOpen] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]),
     [resources, setResources] = useState<Resource[]>([]),
     [notes, setNotes] = useState<Note[]>([]),
@@ -194,6 +238,7 @@ function App() {
     [query, setQuery] = useState(""),
     [category, setCategory] = useState("全部"),
     [dialog, setDialog] = useState<Dialog | null>(null),
+    [cloudOpen, setCloudOpen] = useState(false),
     [toast, setToast] = useState(""),
     [saveStatus, setSaveStatus] = useState("已保存"),
     [ready, setReady] = useState(false),
@@ -213,6 +258,9 @@ function App() {
       }[]
     >([]),
     [communityRevision, setCommunityRevision] = useState(0),
+    [communityView, setCommunityView] = useState<"discover" | "mine">(
+      "discover",
+    ),
     [personalTemplateTab, setPersonalTemplateTab] = useState<
       "favorites" | "published"
     >("favorites"),
@@ -231,6 +279,53 @@ function App() {
     [history, setHistory] = useState<Mod[][]>([]),
     [future, setFuture] = useState<Mod[][]>([]),
     [menu, setMenu] = useState<string | null>(null);
+  const [savingTemplate, setSavingTemplate] = useState<Template | null>(null);
+  const [localConflict, setLocalConflict] = useState(false);
+  const [recoveryMessage, setRecoveryMessage] = useState("");
+  const journal = useMemo(() => createDraftJournal(() => localStorage, uid()), []);
+  const latestLocal = useRef({ workspaces, notes });
+  latestLocal.current = { workspaces, notes };
+  function retainLocalDraft() {
+    try {
+      return journal.retain(latestLocal.current.workspaces, latestLocal.current.notes);
+    } catch {
+      setRecoveryMessage("草稿备份失败，请勿刷新或关闭页面；请先下载本页内容。");
+      return undefined;
+    }
+  }
+  function reportLocalFailure(error: unknown) {
+    if (error instanceof LocalConflictError) {
+      setLocalConflict(true);
+      setSaveStatus("保存冲突");
+      retainLocalDraft();
+    } else {
+      setSaveStatus("保存失败");
+      notify("本地保存失败，请保留本页并下载草稿后重试。");
+    }
+  }
+  useEffect(() => store.onConflict(() => reportLocalFailure(new LocalConflictError())), []);
+  function downloadLocalDrafts() {
+    let retained: unknown[] = [];
+    try { retained = journal.drafts(); } catch { /* export live state even if storage failed */ }
+    const url = URL.createObjectURL(new Blob([JSON.stringify({
+      format: "learnspace-local-recovery-v1",
+      drafts: retained,
+      current: latestLocal.current,
+    }, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "LearnSpace-未保存草稿.json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  const cloudSync = useCloudSync(
+    supabase,
+    session?.user.id,
+    ready && !localConflict,
+    workspaces,
+    notes,
+    setWorkspaces,
+  );
   function toggleFavorite(id: string) {
     const next = favorites.includes(id)
       ? favorites.filter((x) => x !== id)
@@ -243,9 +338,31 @@ function App() {
       notify("收藏保存失败，请检查浏览器存储权限");
     }
   }
-  const current = workspaces.find((w) => w.id === currentId);
-  const bus = useMemo(() => new WorkspaceBus(currentId), [currentId]);
-  useEffect(() => () => bus.dispose(), [bus]);
+  const rawCurrent = workspaces.find((w) => w.id === currentId);
+  const current = rawCurrent ? projectWorkspace(rawCurrent) : undefined;
+  const taskScope = rawCurrent?.activeTaskId;
+  const visibleNotes = rawCurrent ? scopedNotes(rawCurrent, notes) : notes;
+  const bus = useMemo(
+    () => new WorkspaceBus(currentId + ":" + (taskScope || "free")),
+    [currentId, taskScope],
+  );
+  useEffect(() => {
+    return () => bus.dispose();
+  }, [bus]);
+  function setConnections(edges: Connection[]) {
+    if (!current) return;
+    const issue = connectionError(current.modules, edges);
+    if (issue) throw Error(issue);
+    const id = currentId;
+    setWorkspaces((ws) =>
+      ws.map((w) =>
+        w.id === id && !connectionError(w.modules, edges)
+          ? { ...w, connections: edges, updatedAt: Date.now() }
+          : w,
+      ),
+    );
+    notify("连接已保存；未获取内容或调用 AI。");
+  }
   useEffect(() => {
     if (page !== "editor") bus.emit("selection.cleared", {});
   }, [page, bus]);
@@ -269,8 +386,21 @@ function App() {
       );
     }
     Promise.all([store.workspaces(), store.resources(), store.notes()])
-      .then(([w, r, n]) => {
-        setWorkspaces(w);
+      .then(async ([w, r, n]) => {
+        const migrated = [];
+        for (const workspace of w) {
+          const result = migrateTaskContent(workspace, n);
+          migrated.push(result.workspace);
+          n = result.notes;
+        }
+        try {
+          await store.saveSnapshot(migrated, n);
+        } catch (error) {
+          // Keep the migrated in-memory content available even if another tab won.
+          latestLocal.current = { workspaces: migrated, notes: n };
+          reportLocalFailure(error);
+        }
+        setWorkspaces(migrated);
         setResources(r);
         setNotes(n);
         setReady(true);
@@ -293,26 +423,44 @@ function App() {
   }, []);
   useEffect(() => {
     if (!ready) return;
+    // Journal synchronously before the debounce. Keep it until this exact save succeeds.
+    const draft = retainLocalDraft();
+    if (localConflict) return;
     setSaveStatus("保存中");
+    let current = true;
     const timer = setTimeout(() => {
-      store
-        .saveSnapshot(workspaces, notes)
-        .then(() => setSaveStatus("已保存"))
-        .catch(() => {
-          setSaveStatus("保存失败");
-          notify("本地保存失败，可能是存储空间不足。请重试。");
-        });
+      store.saveSnapshot(workspaces, notes)
+        .then(() => {
+          if (draft) journal.acknowledge(draft);
+          if (current) setSaveStatus("已保存");
+        })
+        .catch(reportLocalFailure);
     }, 450);
-    return () => clearTimeout(timer);
-  }, [workspaces, notes, ready]);
+    return () => { current = false; clearTimeout(timer); };
+  }, [workspaces, notes, ready, localConflict]);
   useEffect(() => {
     if (!ready) return;
     const flush = () => {
-      void store.saveSnapshot(workspaces, notes).catch(() => {});
+      const draft = retainLocalDraft();
+      if (localConflict) return;
+      const snapshot = latestLocal.current;
+      void store.saveSnapshot(snapshot.workspaces, snapshot.notes)
+        .then(() => { if (draft) journal.acknowledge(draft); })
+        .catch(reportLocalFailure);
+    };
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!localConflict && !recoveryMessage.includes("备份失败")) return;
+      if (retainLocalDraft()) return;
+      event.preventDefault();
+      event.returnValue = "";
     };
     window.addEventListener("pagehide", flush);
-    return () => window.removeEventListener("pagehide", flush);
-  }, [workspaces, notes, ready]);
+    window.addEventListener("beforeunload", warn);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", warn);
+    };
+  }, [ready, localConflict, recoveryMessage]);
   useEffect(() => {
     if (page !== "community" || !supabase) return;
     let active = true;
@@ -349,33 +497,131 @@ function App() {
     };
   }, [page, session?.user.id, communityRevision]);
   useEffect(() => {
+    moduleCache.current.clear();
+  }, [currentId, taskScope]);
+  useEffect(() => {
     if (!current) return;
     current.modules.forEach((m) => moduleCache.current.set(m.id, m));
   }, [current]);
   function updateWorkspace(p: Partial<Workspace>) {
     setWorkspaces((ws) =>
       ws.map((w) =>
-        w.id === currentId ? { ...w, ...p, updatedAt: Date.now() } : w,
+        w.id === currentId
+          ? {
+              ...(p.modules ? changeStructure(w, p.modules) : w),
+              ...Object.fromEntries(
+                Object.entries(p).filter(([k]) => k !== "modules"),
+              ),
+              updatedAt: Date.now(),
+            }
+          : w,
       ),
     );
   }
   function updateMod(id: string, p: Partial<Mod>) {
+    const scope = taskScope || null;
     setWorkspaces((ws) =>
       ws.map((w) =>
         w.id === currentId
-          ? {
-              ...w,
-              updatedAt: Date.now(),
-              modules: w.modules.map((m) => (m.id === id ? { ...m, ...p } : m)),
-            }
+          ? { ...updateModule(w, id, p, scope), updatedAt: Date.now() }
           : w,
+      ),
+    );
+  }
+  function mutateModule(id: string, transform: (mod: Mod) => Partial<Mod>) {
+    const workspaceId = currentId,
+      scope = taskScope || null;
+    setWorkspaces((ws) =>
+      ws.map((w) => {
+        if (
+          w.id !== workspaceId ||
+          (scope && !w.tasks?.some((t) => t.id === scope))
+        )
+          return w;
+        const m = projectWorkspace({
+          ...w,
+          activeTaskId: scope || undefined,
+        }).modules.find((m) => m.id === id);
+        if (!m) return w;
+        const patch = transform(m);
+        if (!Object.keys(patch).length) return w;
+        return { ...updateModule(w, id, patch, scope), updatedAt: Date.now() };
+      }),
+    );
+  }
+  async function saveCustomNote(
+    moduleId: string,
+    targetId: string,
+    runId: string,
+  ) {
+    const mod = current?.modules.find((m) => m.id === moduleId),
+      target = current?.modules.find(
+        (m) => m.id === targetId && m.type === "note",
+      );
+    const run = mod?.data?.custom?.runs.find(
+      (r) => r.id === runId && r.status === "succeeded",
+    );
+    if (!target || !run?.result)
+      throw Error("请选择本任务中的有效笔记模块与成功结果");
+    const note: Note = {
+      id: uid(),
+      workspaceId: currentId,
+      moduleId: targetId,
+      taskId: taskScope,
+      content: `# ${noteTitle(run.result.text, run.config.name)}\n\n${run.result.text}`,
+      sources: customEvidence(run)
+        .filter((e) => run.result!.citations.includes(e.id))
+        .map((e) => e.source),
+      contentKind: "ai",
+      originRun: { moduleId, runId },
+    };
+    await store.saveNote(note);
+    setNotes((ns) => [...ns, note]);
+    updateMod(targetId, { activeNoteId: note.id });
+    notify("已另存为新笔记，保留运行标识与全部引用来源。");
+  }
+  function configureModule(id: string, draft: CustomConfig) {
+    const checked = customConfigSchema.parse(draft);
+    setWorkspaces((ws) =>
+      ws.map((w) =>
+        w.id !== currentId
+          ? w
+          : {
+              ...w,
+              connections: w.connections?.filter(
+                (e) =>
+                  e.target.moduleId !== id ||
+                  checked.fields.some((f) => f.id === e.target.field),
+              ),
+              updatedAt: Date.now(),
+              modules: w.modules.map((m) =>
+                m.id === id
+                  ? {
+                      ...m,
+                      title: checked.name,
+                      customConfig: {
+                        ...checked,
+                        version: (m.customConfig?.version || 0) + 1,
+                      },
+                    }
+                  : m,
+              ),
+            },
       ),
     );
   }
   function structure(modules: Mod[]) {
     if (!current) return;
     const valid = templateSchema.safeParse(
-      safeTemplate({ ...current, modules }),
+      safeTemplate({
+        ...current,
+        modules,
+        connections: (current.connections || []).filter(
+          (e) =>
+            modules.some((m) => m.id === e.source.moduleId) &&
+            modules.some((m) => m.id === e.target.moduleId),
+        ),
+      }),
     );
     if (!valid.success) {
       notify("布局无效：请检查重叠、边界或模块数量");
@@ -416,8 +662,22 @@ function App() {
     t: Template,
     origin?: string,
     materials: SharedMaterial[] = [],
+    planning?: LayoutPlanning,
   ) {
-    const w = fromTemplate(t, origin);
+    let w: Workspace;
+    try {
+      w = fromTemplate(t, origin);
+    } catch (e) {
+      notify(
+        `模板无效，未创建工作台：${e instanceof Error ? e.message : "配置错误"}`,
+      );
+      return;
+    }
+    if (planning) {
+      const checked = layoutResultSchema.safeParse({ ...t, planning });
+      if (!checked.success)
+        return notify("学习方案无效，请检查目标、步骤和工具关联");
+    }
     try {
       const installed = await attachMaterials(w, t, materials, async (path) => {
         if (!supabase) throw Error("尚未配置社区资料服务");
@@ -433,7 +693,7 @@ function App() {
       setNotes((ns) => [...ns, ...installed.notes]);
       setWorkspaces((ws) => [w, ...ws]);
       setDialog(null);
-      open(w, true);
+      open(w, !planning);
       notify("工作台已创建，开始搭建你的学习空间");
     } catch (e) {
       notify(
@@ -448,14 +708,30 @@ function App() {
     if (current.modules.length >= MAX_MODULES)
       return notify(`一个工作台最多 ${MAX_MODULES} 个模块`);
     try {
-      const size = definitions[type].size;
+      const size = isUtilityTool(type)
+        ? { w: 3, h: 3 }
+        : definitions[type].size;
       const layout = position
         ? { x: position.x, y: position.y, ...size }
-        : nextPosition(current.modules, size.w, size.h);
-      structure([
-        ...current.modules,
-        { id: uid(), type, title: labels[type], layout },
-      ]);
+        : nextPosition(
+            current.modules.filter((m) => !isUtilityTool(m.type)),
+            size.w,
+            size.h,
+          );
+      structure(
+        parkUtilityModules([
+          ...current.modules,
+          {
+            id: uid(),
+            type,
+            title: labels[type],
+            layout,
+            ...(type === "custom-ai"
+              ? { customConfig: defaultCustomConfig() }
+              : {}),
+          },
+        ]),
+      );
     } catch (e) {
       notify((e as Error).message);
     }
@@ -471,14 +747,33 @@ function App() {
         group: undefined,
         locked: false,
         title: m.title + " 副本",
-        layout: nextPosition(current.modules, m.layout.w, m.layout.h),
+        layout: nextPosition(
+          current.modules.filter((x) => !isUtilityTool(x.type)),
+          m.layout.w,
+          m.layout.h,
+        ),
       };
+      if (copy.type === "custom-ai" && copy.data?.custom) {
+        copy.data = {
+          ...copy.data,
+          custom: {
+            inputs: copiedCustomInputs(copy.data.custom.inputs),
+            runs: [],
+          },
+        };
+        copy.output = undefined;
+      }
       const clonedNotes = notes
-        .filter((n) => n.moduleId === m.id && n.workspaceId === currentId)
+        .filter(
+          (n) =>
+            n.moduleId === m.id &&
+            n.workspaceId === currentId &&
+            n.taskId === taskScope,
+        )
         .map((n) => ({ ...structuredClone(n), id: uid(), moduleId: id }));
       await Promise.all(clonedNotes.map((n) => store.saveNote(n)));
       setNotes((ns) => [...ns, ...clonedNotes]);
-      structure([...current.modules, copy]);
+      structure(parkUtilityModules([...current.modules, copy]));
     } catch (e) {
       notify((e as Error).message);
     }
@@ -499,37 +794,49 @@ function App() {
     return r.id;
   }
   async function upload(modId: string, f: File) {
-    if (f.type !== "application/pdf" && !f.name.toLowerCase().endsWith(".pdf"))
-      throw Error("请选择 PDF 文件");
-    const header = new TextDecoder().decode(await f.slice(0, 5).arrayBuffer());
-    if (header !== "%PDF-") throw Error("文件不是有效的 PDF");
+    const extractedText = await prepareReadingFile(f);
     const r: Resource = {
       id: uid(),
       name: f.name,
       version: uid(),
       file: f,
+      ...(extractedText !== undefined ? { extractedText } : {}),
       createdAt: Date.now(),
     };
     await store.saveResource(r);
     setResources((rs) => [...rs, r]);
     updateMod(modId, { resourceId: r.id, page: 1 });
-    notify("PDF 已保存到此设备");
+    notify("文件已保存到此设备");
   }
   async function saveNote(n: Note) {
+    n = { ...n, taskId: n.taskId || taskScope };
     setNotes((ns) => [...ns.filter((x) => x.id !== n.id), n]);
     try {
       await store.saveNote(n);
-    } catch {
-      setSaveStatus("保存失败");
-      notify("笔记保存失败，请检查存储空间");
+      return true;
+    } catch (error) {
+      reportLocalFailure(error);
+      return false;
     }
   }
   async function deleteNote(id: string) {
     try {
       await store.removeNote(id);
       setNotes((n) => n.filter((x) => x.id !== id));
+      return true;
+    } catch (error) {
+      reportLocalFailure(error);
+      return false;
+    }
+  }
+  async function deleteResource(id: string) {
+    try {
+      await store.removeResource(id);
+      setResources((rs) => rs.filter((r) => r.id !== id));
+      return true;
     } catch {
-      notify("删除失败");
+      notify("资料删除失败，请重试");
+      return false;
     }
   }
   function receive(
@@ -537,6 +844,7 @@ function App() {
     type: ModuleType,
     text: string,
     source?: Source,
+    contentKind: ContentKind = selectionKind(source),
   ) {
     if (type === "text" || type === "sticky") {
       updateMod(target.id, {
@@ -556,54 +864,193 @@ function App() {
         },
       });
     } else if (type === "note") {
-      const old = notes.find(
-        (n) => n.moduleId === target.id && n.workspaceId === currentId,
+      const old = receivingNote(visibleNotes, currentId, target);
+      const inserted = appendNote(
+        old,
+        currentId,
+        target.id,
+        text,
+        source,
+        contentKind,
       );
-      if (
-        old?.content &&
-        !confirm(`将内容追加到「${target.title}」？已有笔记将保留。`)
-      )
-        return;
-      void saveNote({
-        id: old?.id || uid(),
-        moduleId: target.id,
-        workspaceId: currentId,
-        content:
-          (old?.content ? old.content + "\n\n" : "") +
-          (source
-            ? `> ${text.replace(/\n/g, "\n> ")}\n\n— ${source.resourceName || "原文"}${source.kind === "pdf" || !source.kind ? ` · 第 ${source.page} 页` : ""}`
-            : text),
-        sources: [...(old?.sources || []), ...(source ? [source] : [])],
-      });
+      updateMod(target.id, { activeNoteId: inserted.id });
+      void saveNote(inserted);
     } else {
-      if (target.input && !confirm(`替换「${target.title}」中尚未发送的文本？`))
+      if (
+        hasEditedDraft(target) &&
+        target.input !== text &&
+        !confirm(`「${target.title}」里有你编辑过的草稿。用新内容替换吗？`)
+      )
         return;
       updateMod(target.id, {
         input: type === "chat" ? target.input || "" : text,
         source,
-        output: undefined,
+        data: {
+          ...target.data,
+          flow: {
+            ...target.data?.flow,
+            inputs: [],
+            materials: [],
+            lastText: text,
+            materialMode: "manual",
+          },
+        },
       });
+      if (["translate", "summary", "mindmap", "cards", "quiz"].includes(type))
+        bus.pendingRuns.add(target.id);
     }
+    bus.emit("module.reveal", { moduleId: target.id });
     setDialog(null);
-    notify(`已发送到${target.title}`);
+    notify(type === "note" ? "已添加到笔记" : `已在${target.title}中打开`);
   }
-  function send(type: ModuleType, text: string, source?: Source) {
+  function quickModule(type: ModuleType): Mod | undefined {
+    if (!current) return;
+    if (current.modules.length >= MAX_MODULES) {
+      notify(`一个工作台最多 ${MAX_MODULES} 个模块`);
+      return;
+    }
+    try {
+      const size = definitions[type].size;
+      const mod: Mod = {
+        id: uid(),
+        type,
+        title: labels[type],
+        layout: nextPosition(
+          current.modules.filter((m) => !isUtilityTool(m.type)),
+          size.w,
+          size.h,
+        ),
+      };
+      templateSchema.parse(
+        safeTemplate({ ...current, modules: [...current.modules, mod] }),
+      );
+      structure([...current.modules, mod]);
+      return mod;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "工具创建失败");
+    }
+  }
+  function useFileMaterial(
+    target: Mod,
+    source: { moduleId: string; range: "selection" | "document" },
+  ) {
+    if (!current) return;
+    if (
+      hasEditedDraft(target) &&
+      !confirm(
+        `「${target.title}」里有你编辑过的草稿。用这份文件的内容替换并继续生成吗？`,
+      )
+    )
+      return;
+    try {
+      const workspace = {
+        ...current,
+        modules: current.modules.some((m) => m.id === target.id)
+          ? current.modules
+          : [...current.modules, target],
+      };
+      const ctx = {
+        workspace,
+        notes: visibleNotes,
+        resources,
+        selection: bus.selection,
+        selections: bus.selections,
+      };
+      const item = learningMaterials(target, ctx).find(
+        (i) => i.source.moduleId === source.moduleId && i.file,
+      );
+      if (!item) throw Error("原文件或目标工具不可用，请重新选择");
+      const materials = chooseMaterials(target, ctx, [
+        { ...item, source: { ...item.source, range: source.range } },
+      ]);
+      updateMod(target.id, {
+        data: {
+          ...target.data,
+          flow: {
+            ...target.data?.flow,
+            inputs: [],
+            materials,
+            materialMode: "sources",
+          },
+        },
+      });
+      if (target.type !== "chat") bus.pendingRuns.add(target.id);
+      bus.emit("module.reveal", { moduleId: target.id });
+      setDialog(null);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "材料选择失败");
+    }
+  }
+  function fileAction(source: {
+    moduleId: string;
+    type: "chat" | "translate" | "mindmap" | "cards" | "quiz";
+    range: "selection" | "document";
+  }) {
+    const targets =
+      current?.modules.filter((m) => m.type === source.type) || [];
+    if (targets.length > 1) {
+      setDialog({
+        kind: "target",
+        type: source.type,
+        text: "",
+        targets,
+        material: source,
+      });
+      return;
+    }
+    if (!targets.length) {
+      setDialog({
+        kind: "target",
+        type: source.type,
+        text: "",
+        targets: [],
+        material: source,
+      });
+      return;
+    }
+    useFileMaterial(targets[0], source);
+  }
+  function send(
+    type: ModuleType,
+    text: string,
+    source?: Source,
+    contentKind: ContentKind = selectionKind(source),
+  ) {
     const targets = current?.modules.filter((m) => m.type === type) || [];
-    if (!targets.length) return notify(`请先添加${labels[type]}模块`);
+    if (!targets.length) {
+      setDialog({
+        kind: "target",
+        type,
+        text,
+        source,
+        targets: [],
+        contentKind,
+      });
+      return;
+    }
     if (targets.length > 1)
-      setDialog({ kind: "target", type, text, source, targets });
+      setDialog({ kind: "target", type, text, source, targets, contentKind });
     else
       bus.emit("content.insert", {
         targetId: targets[0].id,
         type,
         text,
         source,
+        contentKind,
       });
   }
   function jump(s: Source) {
     if (s.kind && s.kind !== "pdf") {
       const m = current?.modules.find((m) => m.id === s.moduleId);
       if (m) {
+        if (s.noteId) {
+          const note = visibleNotes.find(
+            (n) => n.id === s.noteId && n.moduleId === m.id,
+          );
+          if (!note)
+            return notify("来源笔记在当前任务不可用；未打开其他篇目。");
+          updateMod(m.id, { activeNoteId: note.id });
+        }
         if (s.kind === "video" && s.timestamp != null)
           updateMod(m.id, { data: { ...m.data, seek: s.timestamp } });
         bus.emit("module.focus", { moduleId: m.id });
@@ -632,41 +1079,50 @@ function App() {
       targets?.find((m) => m.id === s.moduleId) ||
       targets?.find((m) => m.resourceId === r.id) ||
       targets?.[0];
-    if (!m) return notify("请先添加 PDF 阅读模块");
+    if (!m) return notify("请先添加文件阅读模块");
     updateMod(m.id, { resourceId: r.id, page: s.page });
     bus.emit("module.focus", { moduleId: m.id });
-    notify(`已定位到第 ${s.page} 页`);
+    bus.emit("file.navigate", { ...s, moduleId: m.id });
+    notify(
+      `已定位到${r.name.toLowerCase().endsWith(".pdf") ? "第 " + s.page + " 页" : "文本区段 " + s.page}`,
+    );
   }
   useEffect(() => {
     const insert = bus.on("content.insert", (p) => {
       const target = current?.modules.find((m) => m.id === p.targetId);
-      if (target) receive(target, p.type, p.text, p.source);
+      if (target) receive(target, p.type, p.text, p.source, p.contentKind);
     });
     const source = bus.on("source.navigate", jump);
+    const material = bus.on("material.action", fileAction);
     return () => {
       insert();
       source();
+      material();
     };
   }, [bus, current, notes]);
   function exportTemplate(w: Workspace) {
-    const blob = new Blob([JSON.stringify(safeTemplate(w), null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${w.title}.learnspace.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    notify("模板已导出，不包含 PDF、笔记和聊天内容");
+    try {
+      setSavingTemplate(templateSchema.parse(safeTemplate(w)));
+    } catch {
+      notify("模板配置无效，请检查模块配置和连接端点后重试");
+    }
   }
   async function importTemplate(f: File) {
     try {
       if (f.size > 100 * 1024) throw Error("模板文件不能超过 100 KB");
-      const t = templateSchema.parse(JSON.parse(await f.text()));
-      setDialog({ kind: "preview", template: t });
-    } catch {
-      notify("导入失败：请使用合法的 LearnSpace V1 模板，且布局不能重叠");
+      const raw = JSON.parse(await f.text());
+      if (!raw || ![1, 2].includes(raw.version))
+        throw Error("不支持此模板版本；仅支持 LearnSpace V1／V2");
+      const checked = templateSchema.safeParse(raw);
+      if (!checked.success)
+        throw Error(
+          `模板配置无效：${checked.error.issues[0]?.message || "检查模块、连接和布局"}`,
+        );
+      setDialog({ kind: "preview", template: checked.data });
+    } catch (e) {
+      notify(
+        `导入失败：${e instanceof SyntaxError ? "文件不是有效 JSON" : e instanceof Error ? e.message : "请检查模板文件"}`,
+      );
     }
   }
   const sorted = [...workspaces]
@@ -707,6 +1163,7 @@ function App() {
   );
   return (
     <div className={`app ${page === "editor" ? "editor-app" : ""}`}>
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
       {page !== "editor" && (
         <aside className="sidebar">
           <a
@@ -723,9 +1180,10 @@ function App() {
             LearnSpace<span className="brand-period">.</span>
           </a>
           <div className="nav-label">你的学习空间</div>
-          <nav>
+          <nav aria-label="主要导航">
             <button
               className={page === "home" ? "active" : ""}
+              aria-current={page === "home" ? "page" : undefined}
               onClick={() => {
                 setPage("home");
                 setQuery("");
@@ -736,6 +1194,7 @@ function App() {
             </button>
             <button
               className={page === "community" ? "active" : ""}
+              aria-current={page === "community" ? "page" : undefined}
               onClick={() => {
                 setPage("community");
                 setQuery("");
@@ -748,11 +1207,14 @@ function App() {
               <FolderOpen size={19} />
               我的资料<span className="nav-count">{resources.length}</span>
             </button>
+            <button className="mobile-settings" aria-label="设置与帮助" onClick={() => setDialog({ kind: "settings" })}>
+              <Settings size={18} />
+            </button>
           </nav>
           <div className="sidebar-bottom">
             <div className="local-card">
               <span className="local-dot" />
-              本地优先，安心学习<p>你的资料只属于你</p>
+              本地优先，安心学习<p>本地文件保存在此设备</p>
               <ShieldCheck size={30} />
             </div>
             <button
@@ -781,7 +1243,7 @@ function App() {
         </aside>
       )}
       {page !== "editor" ? (
-        <main className="main">
+        <main className="main" id="main-content" tabIndex={-1}>
           <header className="topbar">
             <span>
               {page === "home" ? "工作台 / 我的工作台" : "发现 / 模板社区"}
@@ -789,8 +1251,11 @@ function App() {
             <div>
               <span className="device-tag">
                 <span />
-                所有内容保存在此设备
+                {page === "home" ? "工作台默认保存在此设备" : "浏览公开模板，管理自己的模板"}
               </span>
+              <button className="btn mini" onClick={() => setCloudOpen(true)}>
+                云端工作台
+              </button>
               <button
                 className="icon-button"
                 title="帮助与设置"
@@ -805,8 +1270,7 @@ function App() {
               <>
                 <div className="page-heading">
                   <div>
-                    <div className="eyebrow">A SPACE FOR YOUR MIND</div>
-                    <h1>
+                                        <h1>
                       我的工作台<span className="heading-dot">.</span>
                     </h1>
                     <p>把工具放在一起，让专注自然发生。</p>
@@ -882,8 +1346,7 @@ function App() {
                       />
                     </div>
                     <span className="sort-label">
-                      最近修改
-                      <ChevronDown size={13} />
+                      按最近修改排序
                     </span>
                   </div>
                 </div>
@@ -906,6 +1369,7 @@ function App() {
                     <article className="workspace-card" key={w.id}>
                       <button
                         className="workspace-preview"
+                        aria-label={`打开工作台：${w.title}`}
                         onClick={() => open(w)}
                       >
                         <MiniPreview template={w} />
@@ -954,7 +1418,7 @@ function App() {
                                 </button>
                                 <button onClick={() => exportTemplate(w)}>
                                   <Download size={14} />
-                                  导出模板
+                                  保存／导出组合模板
                                 </button>
                                 <button
                                   className="danger"
@@ -1016,6 +1480,7 @@ function App() {
                     <article className="template-card" key={t.id}>
                       <button
                         className={`template-cover ${t.color}`}
+                        aria-label={`查看模板：${t.title}`}
                         onClick={() =>
                           setDialog({
                             kind: "detail",
@@ -1086,12 +1551,21 @@ function App() {
                 <div className="page-heading">
                   <div>
                     <div className="eyebrow">
-                      BUILT BY LEARNERS, FOR LEARNERS
+                      {communityView === "mine"
+                        ? "YOUR LEARNING COLLECTION"
+                        : "BUILT BY LEARNERS, FOR LEARNERS"}
                     </div>
                     <h1>
-                      发现你的下一种可能<span className="heading-dot">.</span>
+                      {communityView === "mine"
+                        ? "我的模板"
+                        : "发现你的下一种可能"}
+                      <span className="heading-dot">.</span>
                     </h1>
-                    <p>好的学习方式，值得分享。找到适合你的工作台。</p>
+                    <p>
+                      {communityView === "mine"
+                        ? "常用的学习方式，随时再用一次。"
+                        : "好的学习方式，值得分享。找到适合你的工作台。"}
+                    </p>
                   </div>
                   <button
                     className="btn primary"
@@ -1103,314 +1577,340 @@ function App() {
                     发布模板
                   </button>
                 </div>
-                <div className="community-tools">
-                  <div className="filter-tabs">
-                    {[
-                      "全部",
-                      "论文阅读",
-                      "课程复习",
-                      "技术学习",
-                      "通用学习",
-                    ].map((c) => (
-                      <button
-                        key={c}
-                        className={category === c ? "selected" : ""}
-                        onClick={() => setCategory(c)}
-                      >
-                        {c}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="search-field">
-                    <Search size={16} />
-                    <input
-                      aria-label="搜索模板"
-                      placeholder="搜索你需要的模板…"
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <div className="community-notice">
-                  <Globe size={15} />
-                  {supabase
-                    ? "内置精选与社区公开模板"
-                    : "精选内置模板可直接安装。配置社区服务后可浏览和发布在线模板。"}
-                </div>
-                {communityError && (
-                  <p className="inline-error">{communityError}</p>
-                )}
-                <section className="own-submissions" aria-label="我的模板">
-                  <div className="own-submissions-header">
-                    <div
-                      className="personal-template-tabs"
-                      role="tablist"
-                      aria-label="我的模板列表"
-                    >
-                      <button
-                        role="tab"
-                        id="favorites-tab"
-                        aria-controls="personal-template-panel"
-                        aria-selected={personalTemplateTab === "favorites"}
-                        onClick={() => setPersonalTemplateTab("favorites")}
-                      >
-                        <Heart size={14} />
-                        我的收藏<span>{favorites.length}</span>
-                      </button>
-                      <button
-                        role="tab"
-                        id="published-tab"
-                        aria-controls="personal-template-panel"
-                        aria-selected={personalTemplateTab === "published"}
-                        onClick={() => setPersonalTemplateTab("published")}
-                      >
-                        <Upload size={14} />
-                        我的发布<span>{ownSubmissions.length}</span>
-                      </button>
-                    </div>
-                    <button
-                      className="text-button"
-                      onClick={() => setCommunityRevision((r) => r + 1)}
-                    >
-                      <RefreshCw size={12} />
-                      刷新状态
-                    </button>
-                  </div>
-                  <div
-                    id="personal-template-panel"
-                    role="tabpanel"
-                    aria-labelledby={
-                      personalTemplateTab === "favorites"
-                        ? "favorites-tab"
-                        : "published-tab"
-                    }
+                <nav className="template-view-switch" aria-label="模板视图">
+                  <button
+                    aria-pressed={communityView === "discover"}
+                    onClick={() => setCommunityView("discover")}
                   >
-                    {personalTemplateTab === "favorites" ? (
-                      favorites.length ? (
-                        <div className="personal-favorites-list">
-                          {favorites.map((id) => {
-                            const t = allTemplates.find(
-                              (template) => template.id === id,
-                            );
-                            return (
-                              <div className="personal-favorite-row" key={id}>
-                                {t ? (
-                                  <>
-                                    <button
-                                      className={`personal-favorite-cover template-cover ${t.color}`}
-                                      aria-label={`查看收藏的${t.title}`}
-                                      onClick={() =>
-                                        setDialog({
-                                          kind: "detail",
-                                          template: t,
-                                          author: t.author,
-                                          origin: t.id,
-                                          materials:
-                                            allTemplates.find(
-                                              (item) => item.id === t.id,
-                                            )?.sharedMaterials || [],
-                                        })
-                                      }
-                                    >
-                                      <MiniPreview template={t} />
-                                    </button>
-                                    <div className="personal-favorite-info">
-                                      <button
-                                        onClick={() =>
-                                          setDialog({
-                                            kind: "detail",
-                                            template: t,
-                                            author: t.author,
-                                            origin: t.id,
-                                            materials:
-                                              allTemplates.find(
-                                                (item) => item.id === t.id,
-                                              )?.sharedMaterials || [],
-                                          })
-                                        }
-                                      >
-                                        {t.title}
-                                      </button>
-                                      <span>
-                                        {t.category} · {t.modules.length} 个模块
-                                      </span>
-                                    </div>
-                                    <button
-                                      className="btn mini"
-                                      onClick={() =>
-                                        setDialog({
-                                          kind: "preview",
-                                          template: safeTemplate(
-                                            fromTemplate(t),
-                                          ),
-                                          origin: t.id,
-                                          materials:
-                                            allTemplates.find(
-                                              (item) => item.id === t.id,
-                                            )?.sharedMaterials || [],
-                                        })
-                                      }
-                                    >
-                                      安装模板
-                                      <ArrowDownToLine size={13} />
-                                    </button>
-                                  </>
-                                ) : (
-                                  <div className="personal-favorite-info">
-                                    <span>
-                                      此收藏暂时不可用，请刷新或检查社区连接
-                                    </span>
-                                  </div>
-                                )}
-                                <button
-                                  className="template-favorite active"
-                                  aria-label={`取消收藏${t?.title || "暂时不可用的模板"}`}
-                                  title="取消收藏"
-                                  onClick={() => toggleFavorite(id)}
-                                >
-                                  <Heart size={15} />
-                                </button>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <p className="submission-empty">
-                          还没有收藏。点击下方模板的爱心，即可在这里找到。收藏保存在当前设备。
-                        </p>
-                      )
-                    ) : !session ? (
-                      <div className="personal-publish-login">
-                        <p>登录后查看你发布的社区模板。</p>
-                        <button
-                          className="btn mini"
-                          onClick={() => setDialog({ kind: "login" })}
-                        >
-                          登录
-                        </button>
+                    发现模板
+                  </button>
+                  <button
+                    aria-pressed={communityView === "mine"}
+                    onClick={() => setCommunityView("mine")}
+                  >
+                    我的模板
+                  </button>
+                </nav>
+                {communityView === "discover" && (
+                  <>
+                    <div className="community-tools">
+                      <div className="filter-tabs">
+                        {[
+                          "全部",
+                          "论文阅读",
+                          "课程复习",
+                          "技术学习",
+                          "通用学习",
+                        ].map((c) => (
+                          <button
+                            key={c}
+                            className={category === c ? "selected" : ""}
+                            onClick={() => setCategory(c)}
+                          >
+                            {c}
+                          </button>
+                        ))}
                       </div>
-                    ) : ownSubmissions.length ? (
-                      <div className="personal-favorites-list">
-                        {ownSubmissions.map((t) => {
-                          const parsed = templateSchema.safeParse(
-                            t.template_config,
-                          );
-                          let materials: SharedMaterial[] = [];
-                          if (parsed.success)
-                            try {
-                              materials = validateMaterialBindings(
-                                parsed.data,
-                                t.shared_materials || [],
-                              );
-                            } catch {}
-                          const showDetail = () => {
-                            if (parsed.success)
-                              setDialog({
-                                kind: "detail",
-                                template: parsed.data,
-                                author: t.author_name,
-                                origin: t.id,
-                                materials,
-                                ownPublication: true,
-                              });
-                          };
-                          return (
-                            <div
-                              key={t.id}
-                              className="personal-favorite-row personal-published-row"
-                            >
-                              {parsed.success && (
-                                <button
-                                  className="personal-favorite-cover template-cover lavender"
-                                  aria-label={`查看发布的${t.title}`}
-                                  onClick={showDetail}
-                                >
-                                  <MiniPreview template={parsed.data} />
-                                </button>
-                              )}
-                              <div className="personal-favorite-info">
-                                <button
-                                  disabled={!parsed.success}
-                                  onClick={showDetail}
-                                >
-                                  {t.title}
-                                </button>
-                                <div className="personal-published-meta">
-                                  <span>
-                                    {t.category}
-                                    {parsed.success &&
-                                      ` · ${parsed.data.modules.length} 个模块`}
-                                    {materials.length > 0 &&
-                                      ` · ${materials.length} 项资料`}
-                                  </span>
-                                  <span
-                                    className={`submission-status ${t.publication_status}`}
-                                  >
-                                    {t.publication_status === "pending"
-                                      ? "旧版未公开"
-                                      : t.publication_status === "published"
-                                        ? "已公开"
-                                        : "未通过"}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
+                      <div className="search-field">
+                        <Search size={16} />
+                        <input
+                          aria-label="搜索模板"
+                          placeholder="搜索你需要的模板…"
+                          value={query}
+                          onChange={(e) => setQuery(e.target.value)}
+                        />
                       </div>
-                    ) : (
-                      <p className="submission-empty">
-                        发布后的模板会直接进入公开社区。
+                    </div>
+                    <div className="community-notice">
+                      <Globe size={15} />
+                      {supabase
+                        ? "内置精选与社区公开模板"
+                        : "精选内置模板可直接安装。配置社区服务后可浏览和发布在线模板。"}
+                    </div>
+                    {communityError && (
+                      <p className="inline-error">{communityError}</p>
+                    )}
+                  </>
+                )}
+                {communityView === "mine" && (
+                  <>
+                    <TemplateLibrary
+                      install={(template) =>
+                        setDialog({ kind: "preview", template })
+                      }
+                      notify={notify}
+                      renderPreview={(template) => (
+                        <MiniPreview template={template} />
+                      )}
+                      explore={() => setCommunityView("discover")}
+                    />
+                    {personalTemplateTab === "published" && communityError && (
+                      <p className="inline-error" role="alert">
+                        {communityError}
                       </p>
                     )}
-                  </div>
-                </section>
-
-                <div className="template-grid community-grid">
-                  {templates.map((t) => (
-                    <article className="template-card" key={t.id}>
-                      <button
-                        className={`template-cover ${t.color}`}
-                        onClick={() =>
-                          setDialog({
-                            kind: "detail",
-                            template: t,
-                            author: t.author,
-                            origin: t.id,
-                            materials:
-                              allTemplates.find((item) => item.id === t.id)
-                                ?.sharedMaterials || [],
-                          })
+                    <section
+                      className="own-submissions"
+                      aria-label="收藏与发布"
+                    >
+                      <div className="own-submissions-header">
+                        <div
+                          className="personal-template-tabs"
+                          role="tablist"
+                          aria-label="我的模板列表"
+                        >
+                          <button
+                            role="tab"
+                            id="favorites-tab"
+                            aria-controls="personal-template-panel"
+                            aria-selected={personalTemplateTab === "favorites"}
+                            onClick={() => setPersonalTemplateTab("favorites")}
+                          >
+                            <Heart size={14} />
+                            我的收藏<span>{favorites.length}</span>
+                          </button>
+                          <button
+                            role="tab"
+                            id="published-tab"
+                            aria-controls="personal-template-panel"
+                            aria-selected={personalTemplateTab === "published"}
+                            onClick={() => setPersonalTemplateTab("published")}
+                          >
+                            <Upload size={14} />
+                            我的发布<span>{ownSubmissions.length}</span>
+                          </button>
+                        </div>
+                        <button
+                          className="text-button"
+                          onClick={() => setCommunityRevision((r) => r + 1)}
+                        >
+                          <RefreshCw size={12} />
+                          刷新状态
+                        </button>
+                      </div>
+                      <div
+                        id="personal-template-panel"
+                        role="tabpanel"
+                        aria-labelledby={
+                          personalTemplateTab === "favorites"
+                            ? "favorites-tab"
+                            : "published-tab"
                         }
                       >
-                        <MiniPreview template={t} />
-                        <span className="template-category">{t.category}</span>
-                      </button>
-                      <div className="template-info">
-                        <button
-                          className="card-title"
-                          onClick={() =>
-                            setDialog({
-                              kind: "detail",
-                              template: t,
-                              author: t.author,
-                              origin: t.id,
-                              materials:
-                                allTemplates.find((item) => item.id === t.id)
-                                  ?.sharedMaterials || [],
-                            })
-                          }
-                        >
-                          {t.title}
-                        </button>
-                        <span className="author">by {t.author}</span>
-                        <p>{t.description}</p>
-                        <footer>
-                          <div className="template-card-actions">
+                        {personalTemplateTab === "favorites" ? (
+                          favorites.length ? (
+                            <div className="personal-favorites-list">
+                              {favorites.map((id) => {
+                                const t = allTemplates.find(
+                                  (template) => template.id === id,
+                                );
+                                return (
+                                  <div
+                                    className="personal-favorite-row"
+                                    key={id}
+                                  >
+                                    {t ? (
+                                      <>
+                                        <button
+                                          className={`personal-favorite-cover template-cover ${t.color}`}
+                                          aria-label={`查看收藏的${t.title}`}
+                                          onClick={() =>
+                                            setDialog({
+                                              kind: "detail",
+                                              template: t,
+                                              author: t.author,
+                                              origin: t.id,
+                                              materials:
+                                                allTemplates.find(
+                                                  (item) => item.id === t.id,
+                                                )?.sharedMaterials || [],
+                                            })
+                                          }
+                                        >
+                                          <MiniPreview template={t} />
+                                        </button>
+                                        <div className="personal-favorite-info">
+                                          <button
+                                            onClick={() =>
+                                              setDialog({
+                                                kind: "detail",
+                                                template: t,
+                                                author: t.author,
+                                                origin: t.id,
+                                                materials:
+                                                  allTemplates.find(
+                                                    (item) => item.id === t.id,
+                                                  )?.sharedMaterials || [],
+                                              })
+                                            }
+                                          >
+                                            {t.title}
+                                          </button>
+                                          <span>
+                                            {t.category} · {t.modules.length}{" "}
+                                            个模块
+                                          </span>
+                                        </div>
+                                        <button
+                                          className="btn mini"
+                                          onClick={() =>
+                                            setDialog({
+                                              kind: "preview",
+                                              template: safeTemplate(
+                                                fromTemplate(t),
+                                              ),
+                                              origin: t.id,
+                                              materials:
+                                                allTemplates.find(
+                                                  (item) => item.id === t.id,
+                                                )?.sharedMaterials || [],
+                                            })
+                                          }
+                                        >
+                                          安装模板
+                                          <ArrowDownToLine size={13} />
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <div className="personal-favorite-info">
+                                        <span>
+                                          此收藏暂时不可用，请刷新或检查社区连接
+                                        </span>
+                                      </div>
+                                    )}
+                                    <button
+                                      className="template-favorite active"
+                                      aria-label={`取消收藏${t?.title || "暂时不可用的模板"}`}
+                                      title="取消收藏"
+                                      onClick={() => toggleFavorite(id)}
+                                    >
+                                      <Heart size={15} />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <p className="submission-empty">
+                              还没有收藏。在“发现模板”中点击爱心，就能在这里找到。收藏保存在当前设备。
+                            </p>
+                          )
+                        ) : !session ? (
+                          <div className="personal-publish-login">
+                            <p>登录后查看你发布的社区模板。</p>
                             <button
-                              className="template-meta-button"
-                              title="查看模板模块"
-                              aria-label={`查看${t.title}的模块`}
+                              className="btn mini"
+                              onClick={() => setDialog({ kind: "login" })}
+                            >
+                              登录
+                            </button>
+                          </div>
+                        ) : ownSubmissions.length ? (
+                          <div className="personal-favorites-list">
+                            {ownSubmissions.map((t) => {
+                              const parsed = templateSchema.safeParse(
+                                t.template_config,
+                              );
+                              let materials: SharedMaterial[] = [];
+                              if (parsed.success)
+                                try {
+                                  materials = validateMaterialBindings(
+                                    parsed.data,
+                                    t.shared_materials || [],
+                                  );
+                                } catch {}
+                              const showDetail = () => {
+                                if (parsed.success)
+                                  setDialog({
+                                    kind: "detail",
+                                    template: parsed.data,
+                                    author: t.author_name,
+                                    origin: t.id,
+                                    materials,
+                                    ownPublication: true,
+                                  });
+                              };
+                              return (
+                                <div
+                                  key={t.id}
+                                  className="personal-favorite-row personal-published-row"
+                                >
+                                  {parsed.success && (
+                                    <button
+                                      className="personal-favorite-cover template-cover lavender"
+                                      aria-label={`查看发布的${t.title}`}
+                                      onClick={showDetail}
+                                    >
+                                      <MiniPreview template={parsed.data} />
+                                    </button>
+                                  )}
+                                  <div className="personal-favorite-info">
+                                    <button
+                                      disabled={!parsed.success}
+                                      onClick={showDetail}
+                                    >
+                                      {t.title}
+                                    </button>
+                                    <div className="personal-published-meta">
+                                      <span>
+                                        {t.category}
+                                        {parsed.success &&
+                                          ` · ${parsed.data.modules.length} 个模块`}
+                                        {materials.length > 0 &&
+                                          ` · ${materials.length} 项资料`}
+                                      </span>
+                                      <span
+                                        className={`submission-status ${t.publication_status}`}
+                                      >
+                                        {t.publication_status === "pending"
+                                          ? "旧版未公开"
+                                          : t.publication_status === "published"
+                                            ? "已公开"
+                                            : "未通过"}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="submission-empty">
+                            发布后的模板会直接进入公开社区。
+                          </p>
+                        )}
+                      </div>
+                    </section>
+                  </>
+                )}
+                {communityView === "discover" && (
+                  <>
+                    <div className="template-grid community-grid">
+                      {templates.map((t) => (
+                        <article className="template-card" key={t.id}>
+                          <button
+                            className={`template-cover ${t.color}`}
+                        aria-label={`查看模板：${t.title}`}
+                            onClick={() =>
+                              setDialog({
+                                kind: "detail",
+                                template: t,
+                                author: t.author,
+                                origin: t.id,
+                                materials:
+                                  allTemplates.find((item) => item.id === t.id)
+                                    ?.sharedMaterials || [],
+                              })
+                            }
+                          >
+                            <MiniPreview template={t} />
+                            <span className="template-category">
+                              {t.category}
+                            </span>
+                          </button>
+                          <div className="template-info">
+                            <button
+                              className="card-title"
                               onClick={() =>
                                 setDialog({
                                   kind: "detail",
@@ -1424,44 +1924,70 @@ function App() {
                                 })
                               }
                             >
-                              <BookOpen size={13} />
-                              {t.modules.length} 个模块
+                              {t.title}
                             </button>
-                            <button
-                              className={`template-favorite ${favorites.includes(t.id) ? "active" : ""}`}
-                              aria-label={`${favorites.includes(t.id) ? "取消收藏" : "收藏"}${t.title}`}
-                              title="收藏到此设备"
-                              aria-pressed={favorites.includes(t.id)}
-                              onClick={() => toggleFavorite(t.id)}
-                            >
-                              <Heart size={15} />
-                            </button>
+                            <span className="author">by {t.author}</span>
+                            <p>{t.description}</p>
+                            <footer>
+                              <div className="template-card-actions">
+                                <button
+                                  className="template-meta-button"
+                                  title="查看模板模块"
+                                  aria-label={`查看${t.title}的模块`}
+                                  onClick={() =>
+                                    setDialog({
+                                      kind: "detail",
+                                      template: t,
+                                      author: t.author,
+                                      origin: t.id,
+                                      materials:
+                                        allTemplates.find(
+                                          (item) => item.id === t.id,
+                                        )?.sharedMaterials || [],
+                                    })
+                                  }
+                                >
+                                  <BookOpen size={13} />
+                                  {t.modules.length} 个模块
+                                </button>
+                                <button
+                                  className={`template-favorite ${favorites.includes(t.id) ? "active" : ""}`}
+                                  aria-label={`${favorites.includes(t.id) ? "取消收藏" : "收藏"}${t.title}`}
+                                  title="收藏到此设备"
+                                  aria-pressed={favorites.includes(t.id)}
+                                  onClick={() => toggleFavorite(t.id)}
+                                >
+                                  <Heart size={15} />
+                                </button>
+                              </div>
+                              <button
+                                className="btn mini"
+                                onClick={() =>
+                                  setDialog({
+                                    kind: "preview",
+                                    template: safeTemplate(fromTemplate(t)),
+                                    origin: t.id,
+                                    materials:
+                                      allTemplates.find(
+                                        (item) => item.id === t.id,
+                                      )?.sharedMaterials || [],
+                                  })
+                                }
+                              >
+                                安装模板
+                                <ArrowDownToLine size={13} />
+                              </button>
+                            </footer>
                           </div>
-                          <button
-                            className="btn mini"
-                            onClick={() =>
-                              setDialog({
-                                kind: "preview",
-                                template: safeTemplate(fromTemplate(t)),
-                                origin: t.id,
-                                materials:
-                                  allTemplates.find((item) => item.id === t.id)
-                                    ?.sharedMaterials || [],
-                              })
-                            }
-                          >
-                            安装模板
-                            <ArrowDownToLine size={13} />
-                          </button>
-                        </footer>
+                        </article>
+                      ))}
+                    </div>
+                    {!templates.length && (
+                      <div className="no-results">
+                        没有匹配的模板，试试其他关键词
                       </div>
-                    </article>
-                  ))}
-                </div>
-                {!templates.length && (
-                  <div className="no-results">
-                    没有匹配的模板，试试其他关键词
-                  </div>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -1469,7 +1995,7 @@ function App() {
         </main>
       ) : (
         current && (
-          <div className="editor-shell">
+          <div className="editor-shell" id="main-content" tabIndex={-1}>
             <header className="editor-header">
               <button
                 className="back-button"
@@ -1481,7 +2007,7 @@ function App() {
               >
                 <ChevronLeft size={19} />
               </button>
-              <a className="brand compact" onClick={() => setPage("home")}>
+              <a className="brand compact" href="#" aria-label="返回我的工作台" onClick={(event) => { event.preventDefault(); setPage("home"); }}>
                 <span className="brand-mark">
                   <PanelsTopLeft size={18} />
                 </span>
@@ -1498,7 +2024,7 @@ function App() {
                 <Pencil size={13} />
               </button>
               <span
-                className={`save-label ${saveStatus === "保存失败" ? "error" : ""}`}
+                className={`save-label ${saveStatus !== "已保存" && saveStatus !== "保存中" ? "error" : ""}`}
               >
                 <span />
                 {saveStatus}
@@ -1547,6 +2073,9 @@ function App() {
                     </button>
                   </>
                 )}
+                <button className="btn" onClick={() => setCloudOpen(true)}>
+                  云端工作台
+                </button>
                 <button
                   className="btn primary"
                   onClick={() => setDialog({ kind: "publish" })}
@@ -1585,13 +2114,17 @@ function App() {
                     </button>
                     <button
                       onClick={() => {
+                        if (localConflict) {
+                          notify("请先下载草稿，再读取最新内容；不会强制覆盖其他标签页。");
+                          return;
+                        }
                         void store
                           .saveSnapshot(workspaces, notes)
                           .then(() => {
                             setSaveStatus("已保存");
                             notify("保存成功");
                           })
-                          .catch(() => notify("重试保存失败"));
+                          .catch(reportLocalFailure);
                       }}
                     >
                       <Check size={14} />
@@ -1601,30 +2134,50 @@ function App() {
                 )}
               </div>
             </header>
-            <WorkspaceEditor
-              workspace={current}
-              edit={edit}
-              add={addModule}
-              change={structure}
-              duplicate={(m) => void duplicate(m)}
-              notify={notify}
-              ai={() => setDialog({ kind: "ai", adjust: true })}
-              moduleProps={(m) => ({
-                mod: m,
-                bus,
-                resources,
-                notes,
-                workspaceId: currentId,
-                update: (p) => updateMod(m.id, p),
-                upload: (f) => upload(m.id, f),
-                saveResource,
-                send,
-                saveNote: (n) => void saveNote(n),
-                deleteNote: (id) => void deleteNote(id),
-                jump: (s) => bus.emit("source.navigate", s),
-                notify,
-              })}
-            />
+            <div className="learning-canvas">
+              <WorkspaceEditor
+                key={currentId + ":" + (taskScope || "free")}
+                workspace={current}
+                edit={edit}
+                add={addModule}
+                openModuleLibrary={() => setModuleLibraryOpen(true)}
+                change={(modules) => {
+                  try {
+                    structure(parkUtilityModules(modules));
+                  } catch (e) {
+                    notify((e as Error).message);
+                  }
+                }}
+                duplicate={(m) => void duplicate(m)}
+                notify={notify}
+                ai={() => setDialog({ kind: "ai", adjust: true })}
+                moduleProps={(m) => ({
+                  mod: m,
+                  workspace: current,
+                  setConnections,
+                  taskId: taskScope,
+                  noteTargets: current.modules
+                    .filter((m) => m.type === "note")
+                    .map((m) => ({ id: m.id, title: m.title })),
+                  saveCustomNote: (targetId, runId) =>
+                    saveCustomNote(m.id, targetId, runId),
+                  configure: (config) => configureModule(m.id, config),
+                  mutate: (transform) => mutateModule(m.id, transform),
+                  bus,
+                  resources,
+                  notes: visibleNotes,
+                  workspaceId: currentId,
+                  update: (p) => updateMod(m.id, p),
+                  upload: (f) => upload(m.id, f),
+                  saveResource,
+                  send,
+                  saveNote: (n) => saveNote(n),
+                  deleteNote: (id) => void deleteNote(id),
+                  jump: (s) => bus.emit("source.navigate", s),
+                  notify,
+                })}
+              />
+            </div>
           </div>
         )
       )}
@@ -1639,6 +2192,33 @@ function App() {
           e.target.value = "";
         }}
       />
+      {moduleLibraryOpen && (
+        <CustomModuleLibrary
+          close={() => setModuleLibraryOpen(false)}
+          notify={notify}
+          install={
+            page === "editor" && current
+              ? (config) => {
+                  if (current.modules.length >= MAX_MODULES)
+                    throw Error(`一个工作台最多 ${MAX_MODULES} 个模块`);
+                  const module = instantiateCustomModule(
+                    config,
+                    current.modules,
+                  );
+                  structure([...current.modules, module]);
+                  notify("模块已添加，输入和运行记录独立保存。");
+                }
+              : undefined
+          }
+        />
+      )}
+      {savingTemplate && (
+        <TemplateSaveDialog
+          template={savingTemplate}
+          close={() => setSavingTemplate(null)}
+          notify={notify}
+        />
+      )}
       {dialog && (
         <Modal
           dialog={dialog}
@@ -1646,6 +2226,7 @@ function App() {
           published={() => {
             setCommunityRevision((r) => r + 1);
             setPersonalTemplateTab("published");
+            setCommunityView("mine");
             setPage("community");
           }}
           create={create}
@@ -1653,6 +2234,8 @@ function App() {
           workspaces={workspaces}
           resources={resources}
           notes={notes}
+          deleteResource={deleteResource}
+          deleteSavedNote={deleteNote}
           session={session}
           notify={notify}
           setDialog={setDialog}
@@ -1674,7 +2257,12 @@ function App() {
               notify("删除失败，请重试");
             }
           }}
-          apply={(t, base) => {
+          apply={(t, base, planning) => {
+            if (
+              planning &&
+              !layoutResultSchema.safeParse({ ...t, planning }).success
+            )
+              return notify("学习方案无效，请检查后重试");
             if (!current || JSON.stringify(safeTemplate(current)) !== base)
               return notify("工作台布局已改变，请重新生成方案");
             let modules: Mod[];
@@ -1693,13 +2281,71 @@ function App() {
             notify("布局调整已应用，可通过撤销恢复");
           }}
           receive={receive}
+          useFileMaterial={useFileMaterial}
+          createTarget={quickModule}
         />
       )}{" "}
+      {cloudOpen && (
+        <Suspense
+          fallback={
+            <div className="modal-backdrop" role="status">
+              正在加载云端工作台…
+            </div>
+          }
+        >
+          <CloudPanel
+            key={session?.user.id || "guest"}
+            client={supabase}
+            userId={session?.user.id}
+            current={rawCurrent}
+            status={cloudSync.status[currentId]}
+            close={() => setCloudOpen(false)}
+            retry={() => cloudSync.retry(current?.id)}
+            enable={() => {
+              if (!session) return;
+              setWorkspaces((ws) =>
+                ws.map((w) =>
+                  w.id === currentId && !w.cloud
+                    ? {
+                        ...w,
+                        cloud: {
+                          ownerId: session.user.id,
+                          revision: 0,
+                          syncedHash: "",
+                          syncedAt: 0,
+                        },
+                      }
+                    : w,
+                ),
+              );
+            }}
+            restore={(w, n) => {
+              setWorkspaces((ws) => [...ws, w]);
+              setNotes((ns) => [...ns, ...n]);
+              open(w);
+              notify("已恢复工作台与笔记；原始文件需在此设备重新选择");
+            }}
+          />
+        </Suspense>
+      )}
+      {(localConflict || recoveryMessage) && (
+        <section className="local-save-warning" role="alert" aria-label="本地保存提醒">
+          <strong>{localConflict ? "其他标签页已修改内容，自动保存已暂停" : "本地保存失败"}</strong>
+          <p>{localConflict
+            ? "本页修改仍保留，未覆盖其他标签页。请下载草稿，再读取最新内容。"
+            : recoveryMessage}</p>
+          {localConflict && recoveryMessage.includes("备份失败") && <p>{recoveryMessage}</p>}
+          <button onClick={downloadLocalDrafts}>下载未保存草稿</button>
+          {localConflict && <button onClick={() => {
+            if (retainLocalDraft()) window.location.reload();
+          }}>保留草稿并读取最新内容</button>}
+        </section>
+      )}
       {toast && (
-        <div className="toast" role="status">
+        <div className="toast" role="status" aria-live="polite">
           <Check size={17} />
           {toast}
-          <button onClick={() => setToast("")}>
+          <button aria-label="关闭提示" onClick={() => setToast("")}>
             <X size={14} />
           </button>
         </div>
@@ -1708,6 +2354,7 @@ function App() {
   );
 }
 function Modal({
+  createTarget,
   dialog,
   close,
   published,
@@ -1716,6 +2363,8 @@ function Modal({
   workspaces,
   resources,
   notes,
+  deleteResource,
+  deleteSavedNote,
   session,
   notify,
   setDialog,
@@ -1723,6 +2372,7 @@ function Modal({
   remove,
   apply,
   receive,
+  useFileMaterial,
 }: {
   dialog: Dialog;
   close: () => void;
@@ -1731,18 +2381,32 @@ function Modal({
     t: Template,
     origin?: string,
     materials?: SharedMaterial[],
+    planning?: LayoutPlanning,
   ) => Promise<void>;
   current?: Workspace;
   workspaces: Workspace[];
   resources: Resource[];
   notes: Note[];
+  deleteResource: (id: string) => Promise<boolean>;
+  deleteSavedNote: (id: string) => Promise<boolean>;
   session: Session | null;
   notify: (s: string) => void;
   setDialog: (d: Dialog) => void;
   rename: (w: Workspace, title: string) => void;
   remove: (w: Workspace) => Promise<void>;
-  apply: (t: Template, base?: string) => void;
-  receive: (m: Mod, type: ModuleType, text: string, source?: Source) => void;
+  apply: (t: Template, base?: string, planning?: LayoutPlanning) => void;
+  createTarget: (type: ModuleType) => Mod | undefined;
+  useFileMaterial: (
+    target: Mod,
+    source: { moduleId: string; range: "selection" | "document" },
+  ) => void;
+  receive: (
+    m: Mod,
+    type: ModuleType,
+    text: string,
+    source?: Source,
+    contentKind?: ContentKind,
+  ) => void;
 }) {
   const [title, setTitle] = useState(
       dialog.kind === "rename"
@@ -1768,9 +2432,25 @@ function Modal({
     [category, setCategory] = useState("论文阅读"),
     [selectedMaterials, setSelectedMaterials] = useState<string[]>([]),
     [includeMaterials, setIncludeMaterials] = useState(true),
+    [reviewedPrompt, setReviewedPrompt] = useState(false),
     [selectedWorkspace, setSelectedWorkspace] = useState(
       current?.id || workspaces[0]?.id || "",
     );
+  const generation = useRef<AbortController>();
+  const [pendingDeletion, setPendingDeletion] = useState<{
+    kind: "resource" | "note";
+    id: string;
+    name: string;
+  } | null>(null);
+  const [deletingSavedItem, setDeletingSavedItem] = useState(false);
+  const deletionConfirm = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (pendingDeletion) {
+      deletionConfirm.current?.scrollIntoView({ block: "nearest" });
+      deletionConfirm.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    }
+  }, [pendingDeletion]);
+  useEffect(() => () => generation.current?.abort(), []);
   const publishWorkspace = workspaces.find((w) => w.id === selectedWorkspace);
   const candidates = publishWorkspace
     ? materialCandidates(publishWorkspace, resources, notes)
@@ -1803,33 +2483,48 @@ function Modal({
     detail: dialog.kind === "detail" ? dialog.template.title : "模板详情",
     target: "选择接收模块",
   }[dialog.kind];
-  useEffect(() => {
-    const listener = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) close();
-    };
-    window.addEventListener("keydown", listener);
-    return () => window.removeEventListener("keydown", listener);
-  }, [busy]);
+  const dialogPanel = useDialogFocus(close, busy);
   const generate = async () => {
     if (!promptText.trim()) return;
+    generation.current?.abort();
+    const controller = new AbortController();
+    generation.current = controller;
     setBusy(true);
     setError("");
     try {
+      if (
+        dialog.kind === "ai" &&
+        dialog.adjust &&
+        current?.modules.some((m) => m.type === "custom-ai")
+      )
+        throw Error(
+          "已有自定义模块的布局可手动调整；AI 组合搭建请从首页新建，避免覆盖已有配置。",
+        );
       const base = current ? safeTemplate(current) : undefined;
-      const result = await ai("layout", {
-        request: promptText,
-        existing:
-          dialog.kind === "ai" && dialog.adjust && current
-            ? {
-                ...base,
-                modules: base!.modules.map((m, i) => ({
-                  ...m,
-                  instanceId: current.modules[i].id,
-                })),
-              }
-            : undefined,
-      });
+      const result = await ai(
+        "layout",
+        {
+          request: promptText,
+          ...(dialog.kind === "ai" && dialog.adjust
+            ? {}
+            : { mode: "combination", includeCustom: false }),
+          existing:
+            dialog.kind === "ai" && dialog.adjust && current
+              ? {
+                  ...base,
+                  modules: base!.modules.map((m, i) => ({
+                    ...m,
+                    instanceId: current.modules[i].id,
+                  })),
+                }
+              : undefined,
+        },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
       const { planning, ...template } = layoutResultSchema.parse(result);
+      if (dialog.kind === "ai" && dialog.adjust && template.version !== 1)
+        throw Error("布局调整返回了不兼容的组合格式，原工作台未修改");
       setDialog({
         kind: "preview",
         template,
@@ -1838,9 +2533,10 @@ function Modal({
         planning,
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "生成失败，请重试");
+      if (!controller.signal.aborted)
+        setError(e instanceof Error ? e.message : "生成失败，请重试");
     } finally {
-      setBusy(false);
+      if (generation.current === controller) setBusy(false);
     }
   };
   const login = async () => {
@@ -1904,6 +2600,10 @@ function Modal({
     }
     const w = workspaces.find((w) => w.id === selectedWorkspace);
     if (!w) return;
+    if (w.modules.some((m) => m.type === "custom-ai") && !reviewedPrompt) {
+      setError("请检查并确认公开 Prompt 中不含隐私和密钥");
+      return;
+    }
     setBusy(true);
     setError("");
     const uploadedPaths: string[] = [];
@@ -1913,6 +2613,19 @@ function Modal({
         title: title || w.title,
         description,
       });
+      if (
+        template.connections?.some(
+          (e) =>
+            !["text", "selection", "output", "note", "retrieval"].includes(
+              e.source.port,
+            ) ||
+            template.modules.find((m) => m.instanceId === e.target.moduleId)
+              ?.type !== "custom-ai",
+        )
+      )
+        throw Error(
+          "社区暂不支持扩展的数据流模板，请先保存或导出到本地。工作台云端同步不受影响。",
+        );
       const templateId = uid();
       const materials = await uploadMaterials(
         supabase,
@@ -1920,7 +2633,7 @@ function Modal({
         templateId,
         template,
         candidates,
-        selectedMaterials,
+        template.version === 2 ? [] : selectedMaterials,
         uploadedPaths,
       );
       const { error } = await supabase.from("templates").insert({
@@ -1939,6 +2652,13 @@ function Modal({
         publication_status: "published",
       });
       if (error) {
+        if (
+          template.version === 2 &&
+          ["23514", "P0001", "42703"].includes(error.code)
+        )
+          throw Error(
+            "社区尚未启用 V2 组合模板，请执行 server/migrations/007_combination_templates.sql 后重试",
+          );
         if (
           materials.length &&
           (error.code === "PGRST204" || error.code === "42703")
@@ -1980,6 +2700,8 @@ function Modal({
       }}
     >
       <section
+        ref={dialogPanel}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby="dialog-heading"
@@ -2024,7 +2746,7 @@ function Modal({
             <div className="create-options">
               <span>
                 <Grid2X2 size={20} />
-                空白工作台<small>自由组合16 种学习模块</small>
+                空白工作台<small>自由组合学习模块</small>
               </span>
               <button
                 className="text-button"
@@ -2055,10 +2777,11 @@ function Modal({
         {dialog.kind === "ai" && (
           <>
             <p className="modal-subtitle">
-              告诉 AI 你想完成什么，它会帮你选择工具、安排学习步骤和空间。
+              告诉 AI 你想完成什么，它会帮你选择合适的工具和布局。
             </p>
             <textarea
               className="ai-prompt"
+              aria-label="描述你的学习目标"
               autoFocus
               maxLength={500}
               placeholder={
@@ -2092,29 +2815,48 @@ function Modal({
               </div>
             )}
             {error && <p className="inline-error">{error}</p>}
-            <button
-              className="btn primary full"
-              disabled={busy || !promptText.trim() || !session}
-              onClick={() => void generate()}
-            >
-              <Sparkles size={16} />
-              {busy
-                ? "正在为你搭建…"
-                : dialog.adjust
-                  ? "生成调整方案"
-                  : "生成工作台"}
-            </button>
-            {!dialog.adjust && (
+            <div className="ai-generation-actions" aria-busy={busy}>
               <button
-                className="text-button preset-link"
-                disabled={!promptText.trim()}
-                onClick={() =>
-                  setDialog({ kind: "preview", template: suggest(promptText) })
-                }
+                className="btn primary full"
+                disabled={busy || !promptText.trim() || !session}
+                onClick={() => void generate()}
               >
-                预览内置推荐布局（无需 AI）
-                <ArrowRight size={14} />
+                <Sparkles size={16} />
+                {busy
+                  ? "正在为你搭建…"
+                  : dialog.adjust
+                    ? "生成调整方案"
+                    : "生成工作台"}
               </button>
+              {busy && (
+                <button
+                  className="btn"
+                  onClick={() => {
+                    generation.current?.abort();
+                    setBusy(false);
+                    setError("生成已取消，未创建或修改工作台");
+                  }}
+                >
+                  取消生成
+                </button>
+              )}
+            </div>
+            {!dialog.adjust && (
+              <>
+                <button
+                  className="text-button preset-link"
+                  disabled={!promptText.trim()}
+                  onClick={() =>
+                    setDialog({
+                      kind: "preview",
+                      template: suggest(promptText),
+                    })
+                  }
+                >
+                  预览内置推荐布局（无需 AI）
+                  <ArrowRight size={14} />
+                </button>
+              </>
             )}
           </>
         )}
@@ -2125,64 +2867,26 @@ function Modal({
                 ? "检查布局变化，确认后再应用。原有资料和笔记会保留。"
                 : "先看看布局，之后你可以随时调整。"}
             </p>
-            {dialog.planning && (
-              <section className="ai-task-plan">
-                <div className="ai-task-goal">
-                  <Sparkles size={15} />
-                  <div>
-                    <span>我理解的目标</span>
-                    <p>{dialog.planning.goal}</p>
-                  </div>
-                </div>
-                <ol>
-                  {dialog.planning.steps.map((step, i) => (
-                    <li key={i}>
-                      <span className="plan-step-number">{i + 1}</span>
-                      <div>
-                        <b>{step.title}</b>
-                        <p>{step.description}</p>
-                        <div className="plan-tools">
-                          {step.moduleTypes.map((type) => (
-                            <span key={type}>
-                              <MIcon type={type} size={11} />
-                              {labels[type]}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-                <p className="plan-layout-reason">
-                  <b>这样安排空间的原因</b>
-                  {dialog.planning.layoutReason}
-                </p>
-                {!!dialog.planning.assumptions?.length && (
-                  <details>
-                    <summary>方案采用的假设，可随时调整</summary>
-                    {dialog.planning.assumptions.map((a, i) => (
-                      <p key={i}>{a}</p>
-                    ))}
-                  </details>
-                )}
-              </section>
-            )}
-            <div className="preview-layout">
+            <div
+              className={`preview-layout ${dialog.planning ? "plan-layout-preview" : ""}`}
+            >
               <MiniPreview template={dialog.template} large />
               <div>
                 <h3>{dialog.template.title}</h3>
                 <p>{dialog.template.description}</p>
-                <ul>
-                  {dialog.template.modules.map((m, i) => (
-                    <li key={i}>
-                      <MIcon type={m.type} />
-                      {m.title}
-                      <span>
-                        {m.layout.w} × {m.layout.h}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                {!dialog.planning && (
+                  <ul>
+                    {dialog.template.modules.map((m, i) => (
+                      <li key={i}>
+                        <MIcon type={m.type} />
+                        {m.title}
+                        <span>
+                          {m.layout.w} × {m.layout.h}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {dialog.adjust && current && (
                   <div className="layout-diff">
                     <b>调整前 → 调整后</b>
@@ -2191,13 +2895,9 @@ function Modal({
                       {dialog.template.modules.length} 个模块
                     </p>
                     {dialog.template.modules.map((m, i) => {
-                      const old = current.modules.filter(
-                        (x) => x.type === m.type,
-                      )[
-                        dialog.template.modules
-                          .slice(0, i)
-                          .filter((x) => x.type === m.type).length
-                      ];
+                      const old = m.instanceId
+                        ? current.modules.find((x) => x.id === m.instanceId)
+                        : undefined;
                       return (
                         <small key={i}>
                           {m.title}：
@@ -2213,12 +2913,18 @@ function Modal({
                 )}
               </div>
             </div>
+            {dialog.planning && (
+              <PlanEditor template={dialog.template} plan={dialog.planning} />
+            )}
             <div className="privacy-line">
               <ShieldCheck size={15} />
               {dialog.materials?.length
                 ? "附带资料由发布者明确选择公开；未共享内容不会导入。"
-                : "仅包含模块与布局，不会导入他人的私人内容"}
+                : "保存工具与布局，不包含私人学习内容；使用时需重新选择资料"}
             </div>
+            {!dialog.planning && (
+              <TemplateContents template={dialog.template} />
+            )}
             <SharedMaterialList materials={dialog.materials || []} />
             {!!dialog.materials?.length && (
               <label className="install-material-option">
@@ -2242,10 +2948,17 @@ function Modal({
               </button>
               <button
                 className="btn primary"
-                disabled={busy}
+                disabled={
+                  busy ||
+                  (!!dialog.planning &&
+                    !layoutResultSchema.safeParse({
+                      ...dialog.template,
+                      planning: dialog.planning,
+                    }).success)
+                }
                 onClick={async () => {
                   if (dialog.adjust) {
-                    apply(dialog.template, dialog.base);
+                    apply(dialog.template, dialog.base, dialog.planning);
                     return;
                   }
                   setBusy(true);
@@ -2254,6 +2967,7 @@ function Modal({
                       dialog.template,
                       dialog.origin,
                       includeMaterials ? dialog.materials : [],
+                      dialog.planning,
                     );
                   } finally {
                     setBusy(false);
@@ -2278,6 +2992,7 @@ function Modal({
             </p>
             <MiniPreview template={dialog.template} large />
             <p className="detail-description">{dialog.template.description}</p>
+            <TemplateContents template={dialog.template} />
             <SharedMaterialList materials={dialog.materials || []} />
             <div className="detail-modules">
               {dialog.template.modules.map((m, i) => (
@@ -2454,7 +3169,7 @@ function Modal({
             <div className="setting-row">
               <span>
                 <b>本地优先</b>
-                <small>工作台、PDF 与笔记存储在浏览器 IndexedDB</small>
+                <small>工作台、文件与笔记存储在浏览器 IndexedDB</small>
               </span>
               <span className="status-tag">已启用</span>
             </div>
@@ -2474,14 +3189,14 @@ function Modal({
             <div className="setting-row">
               <span>
                 <b>模板导出</b>
-                <small>仅导出布局，PDF、笔记、聊天内容不包含在内</small>
+                <small>仅导出布局，文件、笔记、聊天内容不包含在内</small>
               </span>
               <ShieldCheck size={20} />
             </div>
             <div className="help-box">
               <h3>开始你的第一次学习</h3>
-              <p>1. 新建工作台，点击或拖入16 种模块</p>
-              <p>2. 上传 PDF，选择文字并发送到其他模块</p>
+              <p>1. 新建工作台，点击或拖入需要的学习模块</p>
+              <p>2. 上传 PDF、Word 或文本文件，选择文字并发送到其他模块</p>
               <p>3. 切换「学习」模式，专注阅读与记录</p>
               <p>4. 布局与笔记自动保存；请勿清除浏览器站点数据</p>
             </div>
@@ -2511,6 +3226,29 @@ function Modal({
             <p className="modal-subtitle">
               资料与笔记独立保存，移除工作台或模块不会让它们丢失。
             </p>
+            {pendingDeletion && (
+              <section ref={deletionConfirm} className="saved-item-confirm" role="alert" aria-label="确认删除资料或笔记">
+                <strong>删除{pendingDeletion.kind === "resource" ? "资料" : "笔记"}「{pendingDeletion.name}」？</strong>
+                <p>{pendingDeletion.kind === "resource"
+                  ? "将删除此设备保存的原始文件，引用它的模块需要重新选择文件；已保存的笔记和生成内容仍保留。"
+                  : "将删除这条笔记，引用它的学习材料将不可用；其他笔记和原始文件仍保留。所属工作台已开启云端同步时，这项修改也会同步。"}
+                  此操作无法撤销。</p>
+                <div className="saved-item-actions">
+                  <button className="btn" disabled={deletingSavedItem} onClick={() => setPendingDeletion(null)}>取消</button>
+                  <button className="btn danger-button" disabled={deletingSavedItem} onClick={async () => {
+                    if (deletingSavedItem) return;
+                    setDeletingSavedItem(true);
+                    try {
+                      const ok = await (pendingDeletion.kind === "resource" ? deleteResource : deleteSavedNote)(pendingDeletion.id);
+                      if (ok) {
+                        notify(pendingDeletion.kind === "resource" ? "本地资料已删除" : "本地笔记已删除");
+                        setPendingDeletion(null);
+                      }
+                    } finally { setDeletingSavedItem(false); }
+                  }}>{deletingSavedItem ? "删除中…" : "确认删除"}</button>
+                </div>
+              </section>
+            )}
             <div className="resource-list">
               <h3>
                 本地文件 <span>{resources.length}</span>
@@ -2546,21 +3284,26 @@ function Modal({
                     >
                       <Download size={16} />
                     </button>
+                    <button className="saved-item-delete" title={`删除资料：${r.name}`} aria-label={`删除资料：${r.name}`} disabled={deletingSavedItem}
+                      onClick={() => setPendingDeletion({ kind: "resource", id: r.id, name: r.name })}>
+                      <Trash2 size={16} />删除
+                    </button>
                   </div>
                 ))
               ) : (
                 <p className="small">
-                  还没有资料。在工作台中的 PDF 阅读器上传第一份文件。
+                  还没有资料。在工作台中的 文件阅读器上传第一份文件。
                 </p>
               )}
               <h3>
                 已保存的笔记 <span>{notes.length}</span>
               </h3>
               {notes.map((n) => (
-                <details key={n.id}>
+                <div className="saved-note-row" key={n.id}>
+                <details>
                   <summary>
                     <NotebookPen size={15} />
-                    {n.content.split("\n")[0].slice(0, 50) || "未命名笔记"}
+                    {noteTitle(n.content)}
                     <span>
                       {workspaces.find((w) => w.id === n.workspaceId)?.title ||
                         "归档笔记"}
@@ -2583,6 +3326,11 @@ function Modal({
                     下载 Markdown
                   </button>
                 </details>
+                <button className="saved-item-delete" title="删除笔记" aria-label={`删除笔记：${noteTitle(n.content)}`} disabled={deletingSavedItem}
+                  onClick={() => setPendingDeletion({ kind: "note", id: n.id, name: noteTitle(n.content) })}>
+                  <Trash2 size={16} />删除
+                </button>
+                </div>
               ))}
             </div>
           </>
@@ -2608,6 +3356,7 @@ function Modal({
                 onChange={(e) => {
                   setSelectedWorkspace(e.target.value);
                   setSelectedMaterials([]);
+                  setReviewedPrompt(false);
                   const w = workspaces.find((x) => x.id === e.target.value);
                   setTitle(w?.title || "");
                   setDescription(w?.description || "");
@@ -2657,14 +3406,32 @@ function Modal({
             </label>
             <div className="privacy-line">
               <ShieldCheck size={15} />
-              默认只公开标题、介绍、模块与布局；只有你勾选的资料和笔记会附带，聊天记录不公开。
+              组合模板公开配置、Prompt
+              和连接结构；不携带运行内容。旧版布局模板仍可显式选择附带资料。
             </div>
-            <MaterialPicker
-              candidates={candidates}
-              selected={selectedMaterials}
-              change={setSelectedMaterials}
-              disabled={busy}
-            />
+            {publishWorkspace && (
+              <TemplateContents template={safeTemplate(publishWorkspace)} />
+            )}
+            {publishWorkspace?.modules.some((m) => m.type === "custom-ai") && (
+              <label className="install-material-option">
+                <input
+                  type="checkbox"
+                  checked={reviewedPrompt}
+                  onChange={(e) => setReviewedPrompt(e.target.checked)}
+                />
+                我已检查全部 Prompt、名称和字段，不包含私人内容或 API
+                Key，并同意公开
+              </label>
+            )}
+            {!publishWorkspace?.modules.some((m) => m.type === "custom-ai") &&
+              !publishWorkspace?.connections?.length && (
+                <MaterialPicker
+                  candidates={candidates}
+                  selected={selectedMaterials}
+                  change={setSelectedMaterials}
+                  disabled={busy}
+                />
+              )}
             {error && <p className="inline-error">{error}</p>}
             <button
               className="btn primary full"
@@ -2678,13 +3445,25 @@ function Modal({
         )}
         {dialog.kind === "target" && (
           <>
-            <p className="modal-subtitle">只发送到你选择的模块。</p>
+            <p className="modal-subtitle">
+              {dialog.targets.length
+                ? "选择用哪个工具继续学习。"
+                : `工作台还没有${labels[dialog.type]}，可以添加后继续。`}
+            </p>
             {dialog.targets.map((m) => (
               <button
                 key={m.id}
                 className="target-choice"
                 onClick={() =>
-                  receive(m, dialog.type, dialog.text, dialog.source)
+                  dialog.material
+                    ? useFileMaterial(m, dialog.material)
+                    : receive(
+                        m,
+                        dialog.type,
+                        dialog.text,
+                        dialog.source,
+                        dialog.contentKind,
+                      )
                 }
               >
                 <MIcon type={m.type} />
@@ -2692,6 +3471,25 @@ function Modal({
                 <ArrowRight size={16} />
               </button>
             ))}
+            <button
+              className="btn primary full"
+              onClick={() => {
+                const created = createTarget(dialog.type);
+                if (!created) return;
+                if (dialog.material) useFileMaterial(created, dialog.material);
+                else
+                  receive(
+                    created,
+                    dialog.type,
+                    dialog.text,
+                    dialog.source,
+                    dialog.contentKind,
+                  );
+              }}
+            >
+              <Plus size={15} />
+              添加{labels[dialog.type]}并继续
+            </button>
           </>
         )}
       </section>

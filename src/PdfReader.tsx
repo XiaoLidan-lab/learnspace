@@ -1,6 +1,7 @@
+import { ActionMenu } from "./ActionMenu";
+import { readingAccept } from "./fileReading";
 import { useEffect, useRef, useState } from "react";
-import * as pdfjs from "pdfjs-dist";
-import worker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { pdfjs, openPdf } from "./pdfDocument";
 import {
   ChevronLeft,
   ChevronRight,
@@ -15,7 +16,6 @@ import {
 import type { Mod, Resource, Source } from "./model";
 import type { WorkspaceBus } from "./events";
 import { SelectionTools } from "./SelectionTools";
-pdfjs.GlobalWorkerOptions.workerSrc = worker;
 export function PdfReader({
   mod,
   resources,
@@ -38,11 +38,18 @@ export function PdfReader({
   const [doc, setDoc] = useState<pdfjs.PDFDocumentProxy | null>(null),
     [error, setError] = useState(""),
     [selection, setSelection] = useState(""),
-    [loading, setLoading] = useState(false),
-    [search, setSearch] = useState(""),
-    [matches, setMatches] = useState<number[]>([]),
-    [searching, setSearching] = useState(false),
-    [searchError, setSearchError] = useState("");
+    [loading, setLoading] = useState(false);
+  const reader = useRef<HTMLDivElement>(null);
+  const [readerWidth, setReaderWidth] = useState(0),
+    [renderScale, setRenderScale] = useState(1);
+  useEffect(() => {
+    if (!reader.current) return;
+    const observer = new ResizeObserver(([entry]) =>
+      setReaderWidth(Math.floor(entry.contentRect.width)),
+    );
+    observer.observe(reader.current);
+    return () => observer.disconnect();
+  }, []);
   const canvas = useRef<HTMLCanvasElement>(null),
     layer = useRef<HTMLDivElement>(null);
   const resource = resources.find((r) => r.id === mod.resourceId);
@@ -53,34 +60,34 @@ export function PdfReader({
     setError("");
     if (!resource) return;
     let active = true;
-    let task: pdfjs.PDFDocumentLoadingTask | undefined;
+    const task = openPdf(resource.file);
     setLoading(true);
-    resource.file
-      .arrayBuffer()
-      .then((data) => {
-        if (!active) return;
-        task = pdfjs.getDocument({ data });
-        return task.promise;
-      })
+    task.promise
       .then((d) => {
-        if (active && d) {
+        if (active) {
           setDoc(d);
           setLoading(false);
         }
       })
       .catch(() => {
         if (active) {
-          setError("PDF 读取失败，请重新上传文件");
+          setError("PDF 读取失败或需要密码，请重新选择可读取的文件");
           setLoading(false);
         }
       });
     return () => {
       active = false;
-      void task?.destroy();
+      void task.destroy();
     };
-  }, [resource?.id]);
+  }, [resource?.id, resource?.version]);
   useEffect(() => {
-    if (!doc || !canvas.current || !layer.current) return;
+    if (
+      !doc ||
+      !canvas.current ||
+      !layer.current ||
+      (mod.zoom === undefined && readerWidth < 50)
+    )
+      return;
     let cancelled = false;
     let render: pdfjs.RenderTask | undefined;
     let textLayer: pdfjs.TextLayer | undefined;
@@ -89,7 +96,13 @@ export function PdfReader({
       .getPage(Math.min(page, doc.numPages))
       .then(async (p) => {
         if (cancelled) return;
-        const vp = p.getViewport({ scale: zoom * 1.05 });
+        const base = p.getViewport({ scale: 1 });
+        const scale =
+          mod.zoom === undefined
+            ? Math.max(0.1, (readerWidth - 26) / base.width)
+            : zoom * 1.05;
+        const vp = p.getViewport({ scale });
+        setRenderScale(scale / 1.05);
         const c = canvas.current!;
         c.width = vp.width * devicePixelRatio;
         c.height = vp.height * devicePixelRatio;
@@ -122,7 +135,7 @@ export function PdfReader({
       render?.cancel();
       textLayer?.cancel();
     };
-  }, [doc, page, zoom]);
+  }, [doc, page, zoom, mod.zoom, readerWidth]);
   const src: Source | undefined = resource
     ? {
         kind: "pdf",
@@ -135,7 +148,7 @@ export function PdfReader({
       }
     : undefined;
   return (
-    <div className="pdf-reader">
+    <div className="pdf-reader" ref={reader}>
       <div className="pdf-toolbar">
         <button
           title="上一页"
@@ -169,25 +182,52 @@ export function PdfReader({
         >
           <ChevronRight size={16} />
         </button>
-        <span className="toolbar-divider" />
+        <ActionMenu label="阅读设置">
+          <button
+            title="缩小"
+            onClick={() =>
+              update({
+                zoom: Math.max(
+                  0.1,
+                  (mod.zoom === undefined ? renderScale : zoom) - 0.1,
+                ),
+              })
+            }
+          >
+            <Minus size={14} />
+            缩小
+          </button>
+          <span>
+            {Math.round((mod.zoom === undefined ? renderScale : zoom) * 100)}%
+          </span>
+          <button
+            title="放大"
+            onClick={() =>
+              update({
+                zoom: Math.min(
+                  3,
+                  (mod.zoom === undefined ? renderScale : zoom) + 0.1,
+                ),
+              })
+            }
+          >
+            <Plus size={14} />
+            放大
+          </button>
+        </ActionMenu>
         <button
-          title="缩小"
-          onClick={() => update({ zoom: Math.max(0.4, zoom - 0.1) })}
+          className="pdf-fit-button"
+          aria-pressed={mod.zoom === undefined}
+          title="适应宽度"
+          onClick={() => update({ zoom: undefined })}
         >
-          <Minus size={14} />
+          适应宽度
         </button>
-        <span>{Math.round(zoom * 100)}%</span>
-        <button
-          title="放大"
-          onClick={() => update({ zoom: Math.min(2, zoom + 0.1) })}
-        >
-          <Plus size={14} />
-        </button>
-        <label className="upload-small" title="上传 PDF">
+        <label className="upload-small" title="上传文件">
           <Upload size={15} />
           <input
             type="file"
-            accept="application/pdf"
+            accept={readingAccept}
             onChange={(e) => {
               const f = e.target.files?.[0];
               if (f) void upload(f).catch((err) => setError(err.message));
@@ -195,58 +235,6 @@ export function PdfReader({
           />
         </label>
       </div>
-      {doc && (
-        <div className="pdf-search">
-          <input
-            aria-label="搜索 PDF"
-            placeholder="在文档中搜索…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          <button
-            disabled={searching || !search.trim()}
-            onClick={() => {
-              setSearching(true);
-              setSearchError("");
-              const query = search.toLowerCase();
-              void (async () => {
-                const found: number[] = [];
-                for (let i = 1; i <= doc.numPages; i++) {
-                  const p = await doc.getPage(i);
-                  const t = await p.getTextContent();
-                  if (
-                    t.items
-                      .map((x) => ("str" in x ? x.str : ""))
-                      .join(" ")
-                      .toLowerCase()
-                      .includes(query)
-                  )
-                    found.push(i);
-                }
-                setMatches(found);
-                if (found[0]) update({ page: found[0] });
-              })()
-                .catch(() => setSearchError("搜索失败，请重试"))
-                .finally(() => setSearching(false));
-            }}
-          >
-            {searching ? "搜索中…" : "搜索"}
-          </button>
-          {matches.length > 0 && (
-            <select
-              aria-label="搜索结果页"
-              onChange={(e) => update({ page: Number(e.target.value) })}
-            >
-              {matches.map((p) => (
-                <option key={p} value={p}>
-                  第 {p} 页
-                </option>
-              ))}
-            </select>
-          )}
-          {searchError && <span>{searchError}</span>}
-        </div>
-      )}
       {resource && (
         <div className="filename">
           <FileText size={12} />
@@ -263,13 +251,13 @@ export function PdfReader({
             <FileText size={30} />
           </div>
           <h3>从一份资料开始</h3>
-          <p>上传 PDF，把阅读与思考放在一起</p>
+          <p>上传文件，把阅读与思考放在一起</p>
           <label className="btn primary">
             <Upload size={15} />
-            上传 PDF
+            上传文件
             <input
               type="file"
-              accept="application/pdf"
+              accept={readingAccept}
               onChange={(e) => {
                 const f = e.target.files?.[0];
                 if (f) void upload(f).catch((err) => setError(err.message));

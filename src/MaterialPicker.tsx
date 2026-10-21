@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { FileText, ChevronDown } from "lucide-react";
 import type { MaterialCandidate, SharedMaterial } from "./sharedMaterials";
-import { MarkdownContent } from "./MarkdownContent";
+const MarkdownContent = lazy(() =>
+  import("./MarkdownContent").then((m) => ({ default: m.MarkdownContent })),
+);
 export function MaterialPicker({
   candidates,
   selected,
@@ -94,7 +96,9 @@ export function MaterialPicker({
               {preview === c.id &&
                 (c.kind === "note" ? (
                   <div className="material-note-preview">
-                    <MarkdownContent>{c.value || ""}</MarkdownContent>
+                    <Suspense fallback={<p role="status">正在加载预览…</p>}>
+                      <MarkdownContent>{c.value || ""}</MarkdownContent>
+                    </Suspense>
                   </div>
                 ) : (
                   <pre>{c.value}</pre>

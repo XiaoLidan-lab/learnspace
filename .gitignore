@@ -6,3 +6,7 @@ dist
 !.env.example
 .vercel
 *.tsbuildinfo
+.DS_Store
+# Local design tools and review history are not application dependencies.
+.agents/
+.impeccable/

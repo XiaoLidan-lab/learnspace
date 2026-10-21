@@ -1,6 +1,13 @@
 import { uid, type Mod, type Template } from "./model.js";
 import { definitions } from "./definitions.js";
-export type LayoutPreset = "双栏" | "三栏" | "四宫格" | "主次" | "自适应";
+import { isUtilityTool } from "./utilityTools.js";
+export type LayoutPreset =
+  | "双栏"
+  | "三栏"
+  | "四宫格"
+  | "主次"
+  | "自适应"
+  | "按用途";
 export function overlaps(a: Mod["layout"], b: Mod["layout"]) {
   return (
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
@@ -28,6 +35,16 @@ export function containers(modules: Mod[]) {
   );
 }
 export function arrange(modules: Mod[], preset: LayoutPreset): Mod[] {
+  if (modules.some((m) => isUtilityTool(m.type))) {
+    const main = arrange(
+      modules.filter((m) => !isUtilityTool(m.type)),
+      preset,
+    );
+    return parkUtilityModules(
+      modules.map((m) => main.find((x) => x.id === m.id) || m),
+    );
+  }
+  if (preset === "按用途") return arrangeForLearning(modules);
   const boxes = containers(modules);
   const positions = new Map<string, Mod["layout"]>();
   let y = 0;
@@ -66,6 +83,18 @@ export function nextPosition(modules: Mod[], w: number, h: number) {
     }
   }
   throw Error("画布已满，请调整布局或移除模块");
+}
+// Keep compact legacy layout metadata for templates; tools have no canvas body.
+export function parkUtilityModules(modules: Mod[]): Mod[] {
+  if (!modules.some((m) => isUtilityTool(m.type))) return modules;
+  const placed = modules.filter((m) => !isUtilityTool(m.type));
+  const parked = new Map<string, Mod>();
+  for (const m of modules.filter((m) => isUtilityTool(m.type))) {
+    const next = { ...m, group: undefined, layout: nextPosition(placed, 3, 3) };
+    placed.push(next);
+    parked.set(m.id, next);
+  }
+  return modules.map((m) => parked.get(m.id) || m);
 }
 export function stackModules(
   modules: Mod[],
@@ -145,7 +174,7 @@ export function applyPlan(current: Mod[], template: Template) {
   return template.modules.map((p) => {
     const old = p.instanceId
       ? current.find((m) => m.id === p.instanceId && m.type === p.type)
-      : current.find((m) => m.type === p.type && !used.has(m.id));
+      : undefined;
     if (p.instanceId && !old) throw Error("方案引用了不存在的模块");
     if (old && used.has(old.id)) throw Error("方案重复引用模块");
     if (old) used.add(old.id);
@@ -175,4 +204,53 @@ export function restoreStructure(snapshot: Mod[], cache: Map<string, Mod>) {
       locked: m.locked,
     };
   });
+}
+
+// This is a layout operation only: preserve instances, groups, content and connections.
+export function arrangeForLearning(modules: Mod[]): Mod[] {
+  if (modules.some((m) => isUtilityTool(m.type)))
+    return arrange(modules, "按用途");
+  const boxes = containers(modules);
+  if (!boxes.length) return modules;
+  const reading = (m: Mod) =>
+    modules.some(
+      (x) =>
+        (x.id === m.id || (m.group && x.group === m.group)) &&
+        ["pdf", "web", "video"].includes(x.type),
+    );
+  const primary =
+    boxes.find(reading) ||
+    boxes.find((m) => m.type === "quiz") ||
+    boxes.find((m) => ["note", "mindmap", "text"].includes(m.type)) ||
+    boxes[0];
+  const positions = new Map<string, Mod["layout"]>();
+  const put = (m: Mod, x: number, y: number, w: number, h: number) => {
+    if (y > 100)
+      throw Error("模块过多，无法按用途排列，请先移除部分模块或选择其他布局");
+    positions.set(m.group || m.id, { x, y, w, h });
+  };
+  const rest = boxes.filter((m) => m !== primary);
+  const helpers = rest.filter((m) => !reading(m)).slice(0, 2);
+  const height = reading(primary) ? 16 : 14;
+  put(primary, 0, 0, helpers.length ? 8 : 12, height);
+  helpers.forEach((m, i) => put(m, 8, i * (height / 2), 4, height / 2));
+  let y = height;
+  const remaining = rest.filter((m) => !helpers.includes(m));
+  for (let i = 0; i < remaining.length; ) {
+    const a = remaining[i++];
+    if (reading(a)) {
+      put(a, 0, y, 12, 14);
+      y += 14;
+    } else {
+      const b =
+        remaining[i] && !reading(remaining[i]) ? remaining[i++] : undefined;
+      put(a, 0, y, b ? 6 : 12, 8);
+      if (b) put(b, 6, y, 6, 8);
+      y += 8;
+    }
+  }
+  return modules.map((m) => ({
+    ...m,
+    layout: { ...positions.get(m.group || m.id)! },
+  }));
 }

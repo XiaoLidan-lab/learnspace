@@ -1,11 +1,22 @@
 import type { ModuleType } from "./definitions";
-import type { Source } from "./model";
+import type { ContentKind, Source } from "./model";
 export type SelectionContext = Source & {
   text: string;
   moduleId: string;
   createdAt: number;
 };
 export type WorkspaceEvents = {
+  "material.edit": { moduleId: string };
+  "material.action": {
+    moduleId: string;
+    type: "chat" | "translate" | "mindmap" | "cards" | "quiz";
+    range: "selection" | "document";
+  };
+  "connection.request": {
+    moduleId: string;
+    port: "text" | "selection" | "output" | "note";
+    noteId?: string;
+  };
   "selection.changed": SelectionContext;
   "selection.cleared": { moduleId?: string };
   "content.insert": {
@@ -14,13 +25,18 @@ export type WorkspaceEvents = {
     text: string;
     source?: Source;
     automatic?: boolean;
+    contentKind?: ContentKind;
   };
   "source.navigate": Source;
+  "file.navigate": Source;
   "module.focus": { moduleId: string };
+  "module.reveal": { moduleId: string };
 };
 export class WorkspaceBus {
   readonly workspaceId: string;
   selection: SelectionContext | null = null;
+  readonly selections: Record<string, SelectionContext> = {};
+  readonly pendingRuns = new Set<string>();
   private handlers = new Map<
     keyof WorkspaceEvents,
     Set<(payload: any) => void>
@@ -57,8 +73,17 @@ export class WorkspaceBus {
       )
         return;
       this.selection = next;
+      this.selections[next.moduleId] = next;
     }
-    if (event === "selection.cleared") this.selection = null;
+    if (event === "selection.cleared") {
+      const { moduleId } = payload as { moduleId?: string };
+      if (!moduleId || this.selection?.moduleId === moduleId)
+        this.selection = null;
+      // Keep each source's last explicit fragment when focus moves to another tool.
+      if (!moduleId)
+        for (const id of Object.keys(this.selections))
+          delete this.selections[id];
+    }
     this.emitting.add(event);
     try {
       this.handlers.get(event)?.forEach((h) => h(payload));
@@ -68,6 +93,8 @@ export class WorkspaceBus {
   }
   dispose() {
     this.handlers.clear();
+    this.pendingRuns.clear();
     this.selection = null;
+    for (const id of Object.keys(this.selections)) delete this.selections[id];
   }
 }

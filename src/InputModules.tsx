@@ -172,7 +172,7 @@ export function WebModule(p: ModuleProps) {
       {adapter ? (
         <>
           <div className="embed-notice">
-            网页可能限制嵌入；若显示空白或拒绝访问，请
+            无法正常显示？
             <a href={adapter.url} target="_blank" rel="noopener noreferrer">
               在原站打开
               <ExternalLink size={12} />
@@ -187,7 +187,7 @@ export function WebModule(p: ModuleProps) {
                 )
               }
             >
-              {mod.data?.webMode === "external" ? "重试嵌入" : "切换外部打开"}
+              {mod.data?.webMode === "external" ? "在此打开" : "仅在原站浏览"}
             </button>
           </div>
           {mod.data?.webMode !== "external" && (
@@ -213,7 +213,7 @@ export function WebModule(p: ModuleProps) {
           <label className="transcript-label">
             网页摘录
             {!adapter.capabilities.selection && (
-              <small>跨域网页无法直接读取选区，可粘贴你有权使用的内容</small>
+              <small>可在此粘贴网页中要学习的段落</small>
             )}
           </label>
           <textarea
@@ -348,9 +348,7 @@ export function VideoModule(p: ModuleProps) {
         <div className="embed-notice">
           <span>
             {adapter.name} ·{" "}
-            {adapter.capabilities.seek
-              ? "支持时间点定位"
-              : "不提供外部进度控制"}
+            {adapter.capabilities.seek ? "可跳转到时间点" : "在原站继续观看"}
           </span>
           <a href={adapter.url} target="_blank" rel="noopener noreferrer">
             无法播放？原站打开
@@ -401,7 +399,7 @@ export function VideoModule(p: ModuleProps) {
       </div>
       <textarea
         aria-label="视频文字稿"
-        placeholder="手动粘贴或导入字幕。平台播放不代表字幕可获取。"
+        placeholder="粘贴字幕或导入文字稿，选中内容即可提问、翻译。"
         value={mod.data?.transcript || ""}
         onChange={(e) => update(patchData(mod, { transcript: e.target.value }))}
         onSelect={(e) =>
@@ -528,6 +526,13 @@ export function ImageModule(p: ModuleProps) {
           <p>上传一张图片，或输入图片地址</p>
         )}
       </div>
+      <label className="transcript-label">图片说明</label>
+      <textarea
+        aria-label="图片说明"
+        placeholder="填写图中文字或说明，供已连接的工具使用；不会自动识别图片。"
+        value={mod.data?.text || ""}
+        onChange={(e) => update(patchData(mod, { text: e.target.value }))}
+      />
       <span className="data-footer">双击图片打开完整预览</span>
     </div>
   );

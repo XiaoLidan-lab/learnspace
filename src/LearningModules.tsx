@@ -1,7 +1,17 @@
+import { quizPreview } from "./quizPreview";
+import { MathText } from "./MathText";
+import { ActionMenu } from "./ActionMenu";
+import { SourceReferences } from "./SourceReferences";
+import { LearningInput, isDirectInput } from "./LearningInput";
+import { DocumentStatus } from "./DocumentStatus";
+import { useQuickRun } from "./useQuickRun";
+import { QuizFeedback } from "./QuizFeedback";
+import { useMaterialAI } from "./useMaterialAI";
 import { MarkdownContent } from "./MarkdownContent";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus,
+  Layers,
   Trash2,
   Sparkles,
   Copy,
@@ -12,15 +22,19 @@ import {
   ChevronRight,
   Check,
   GripVertical,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import type { ModuleProps } from "./moduleProps";
 import { patchData } from "./moduleProps";
+import { quizAttempt } from "./taskIntelligence";
 import { uid } from "./model";
-import { ContextInput, SourceLink } from "./SelectionTools";
+import { ContextInput } from "./SelectionTools";
 import { useAI } from "./useAI";
 export function SummaryModule(p: ModuleProps) {
   const { mod, update, send, notify } = p;
-  const { busy, error, run } = useAI(
+  const { busy, error, run, connected, progress, cancel } = useMaterialAI(
+    p,
     (mod.input || "") + (mod.settings?.summaryStyle || "brief"),
   );
   return (
@@ -42,26 +56,27 @@ export function SummaryModule(p: ModuleProps) {
         <option value="detailed">详细摘要</option>
         <option value="bullets">要点提炼</option>
       </select>
-      <textarea
-        aria-label="待总结内容"
-        placeholder="输入文本或接收其他模块的选段…"
-        value={mod.input || ""}
-        onChange={(e) => update({ input: e.target.value })}
-      />
+      <LearningInput p={p} label="待总结内容" />
       <button
         className="btn primary"
-        disabled={busy || !mod.input?.trim()}
+        disabled={busy || (!mod.input?.trim() && !connected)}
         onClick={() =>
           void run(
             "summary",
             { text: mod.input, style: mod.settings?.summaryStyle || "brief" },
-            (output) => update({ output }),
+            (output) => ({ output }),
           )
         }
       >
         <Sparkles size={14} />
         {busy ? "总结中…" : "生成摘要"}
       </button>
+      <DocumentStatus
+        mod={mod}
+        busy={busy}
+        progress={progress}
+        cancel={cancel}
+      />
       {error && <p className="inline-error">{error}</p>}
       {mod.output && (
         <div className="ai-output">
@@ -78,7 +93,7 @@ export function SummaryModule(p: ModuleProps) {
               <Copy size={13} />
               复制
             </button>
-            <button onClick={() => send("note", mod.output!, mod.source)}>
+            <button onClick={() => send("note", mod.output!, mod.source, "ai")}>
               存入笔记
             </button>
           </div>
@@ -93,10 +108,38 @@ export function CardsModule(p: ModuleProps) {
   const [front, setFront] = useState(""),
     [back, setBack] = useState(""),
     [editing, setEditing] = useState<string>(),
-    [flipped, setFlipped] = useState<string[]>([]);
-  const { busy, error, run } = useAI(
+    [editor, setEditor] = useState(false),
+    [collection, setCollection] = useState(false),
+    [index, setIndex] = useState(0),
+    [flipped, setFlipped] = useState(false),
+    [setup, setSetup] = useState(false);
+  const { busy, error, run, connected, progress, cancel } = useMaterialAI(
+    p,
     (mod.input || "") + JSON.stringify(mod.data || {}),
   );
+  useEffect(() => {
+    setFront("");
+    setBack("");
+    setEditing(undefined);
+    setEditor(false);
+    setCollection(false);
+    setIndex(0);
+    setFlipped(false);
+    setSetup(false);
+  }, [p.taskId, p.workspaceId, mod.id]);
+  const activeIndex = Math.min(index, Math.max(0, cards.length - 1));
+  useEffect(
+    () =>
+      p.bus.on("material.edit", ({ moduleId }) => {
+        if (moduleId === mod.id) setSetup(true);
+      }),
+    [p.bus, mod.id],
+  );
+  const card = cards[activeIndex];
+  const move = (next: number) => {
+    setIndex(Math.max(0, Math.min(cards.length - 1, next)));
+    setFlipped(false);
+  };
   const save = () => {
     if (!front.trim() || !back.trim()) return;
     update(
@@ -109,104 +152,211 @@ export function CardsModule(p: ModuleProps) {
     setFront("");
     setBack("");
     setEditing(undefined);
+    setEditor(false);
   };
+  const edit = (id?: string) => {
+    if (
+      editor &&
+      (front.trim() || back.trim()) &&
+      !confirm("放弃尚未保存的卡片编辑？")
+    )
+      return;
+    const selected = cards.find((c) => c.id === id);
+    setFront(selected?.front || "");
+    setBack(selected?.back || "");
+    setEditing(id);
+    setEditor(true);
+  };
+  const remove = (id: string) => {
+    if (confirm("删除这张卡片？"))
+      update(patchData(mod, { cards: cards.filter((c) => c.id !== id) }));
+  };
+  const generate = () => {
+    void run("cards", { text: mod.input }, (result, material) =>
+      patchData(material, {
+        cards: [
+          ...cards,
+          ...result.cards.map((c: any) => ({
+            ...c,
+            id: uid(),
+            source: material.source,
+          })),
+        ],
+      }),
+    );
+  };
+  useQuickRun(p, busy, generate);
   return (
-    <div className="utility-body">
-      <ContextInput {...p} />
-      <details open={!!mod.input}>
-        <summary>用选段生成卡片</summary>
-        <textarea
-          aria-label="卡片学习材料"
-          placeholder="输入学习材料…"
-          value={mod.input || ""}
-          onChange={(e) => update({ input: e.target.value })}
-        />
-        <button
-          className="btn primary"
-          disabled={busy || !mod.input?.trim()}
-          onClick={() =>
-            void run("cards", { text: mod.input }, (result) =>
-              update(
-                patchData(mod, {
-                  cards: [
-                    ...cards,
-                    ...result.cards.map((c: any) => ({
-                      ...c,
-                      id: uid(),
-                      source: mod.source,
-                    })),
-                  ],
-                }),
-              ),
-            )
-          }
-        >
-          <Sparkles size={14} />
-          {busy ? "生成中…" : "AI 生成卡片"}
-        </button>
-      </details>
-      {error && <p className="inline-error">{error}</p>}
-      <div className="card-form">
-        <input
-          aria-label="卡片正面"
-          placeholder="正面 · 一个问题"
-          value={front}
-          onChange={(e) => setFront(e.target.value)}
-        />
-        <textarea
-          aria-label="卡片背面"
-          placeholder="背面 · 答案与解释"
-          value={back}
-          onChange={(e) => setBack(e.target.value)}
-        />
-        <button
-          className="btn mini"
-          disabled={!front.trim() || !back.trim()}
-          onClick={save}
-        >
-          <Plus size={13} />
-          {editing ? "保存修改" : "添加卡片"}
-        </button>
-      </div>
-      {cards.map((c) => (
-        <article className="knowledge-card" key={c.id}>
+    <div className="utility-body cards-module">
+      <div className="learning-section-toolbar">
+        <div className="segmented-control" aria-label="卡片查看方式">
           <button
-            className="card-flip"
-            onClick={() =>
-              setFlipped((f) =>
-                f.includes(c.id) ? f.filter((x) => x !== c.id) : [...f, c.id],
-              )
-            }
+            aria-pressed={!collection}
+            onClick={() => setCollection(false)}
           >
-            <small>{flipped.includes(c.id) ? "答案" : "问题"} · 点击翻转</small>
-            <p>{flipped.includes(c.id) ? c.back : c.front}</p>
+            复习
           </button>
+          <button aria-pressed={collection} onClick={() => setCollection(true)}>
+            卡片集{cards.length ? ` · ${cards.length}` : ""}
+          </button>
+        </div>
+        <ActionMenu label="卡片操作">
+          <button onClick={() => edit()}>
+            <Plus size={14} />
+            手动添加卡片
+          </button>
+          <button onClick={() => setSetup((v) => !v)}>从材料制作卡片</button>
+        </ActionMenu>
+      </div>
+      {(!cards.length || setup) && (
+        <div className="learning-setup">
+          <LearningInput p={p} label="卡片学习内容" />
+          <button
+            className="btn primary"
+            disabled={
+              busy || (isDirectInput(p) ? !mod.input?.trim() : !connected)
+            }
+            onClick={generate}
+          >
+            <Sparkles size={14} />
+            {busy ? "制作中…" : cards.length ? "继续制作卡片" : "制作卡片"}
+          </button>
+          {!cards.length && !editor && (
+            <button className="text-button" onClick={() => edit()}>
+              手动添加
+            </button>
+          )}
+        </div>
+      )}
+      <DocumentStatus
+        mod={mod}
+        busy={busy}
+        progress={progress}
+        cancel={cancel}
+      />
+      {error && (
+        <p className="inline-error" role="alert">
+          {error}
+        </p>
+      )}
+      {editor && (
+        <div className="card-form">
+          <h4>{editing ? "编辑卡片" : "添加卡片"}</h4>
+          <input
+            aria-label="卡片正面"
+            placeholder="问题或概念"
+            value={front}
+            onChange={(e) => setFront(e.target.value)}
+          />
+          <textarea
+            aria-label="卡片背面"
+            placeholder="答案与解释"
+            value={back}
+            onChange={(e) => setBack(e.target.value)}
+          />
           <div className="inner-toolbar">
-            <SourceLink source={c.source} jump={p.jump} />
+            <button
+              className="btn primary mini"
+              disabled={!front.trim() || !back.trim()}
+              onClick={save}
+            >
+              保存卡片
+            </button>
             <button
               onClick={() => {
-                setFront(c.front);
-                setBack(c.back);
-                setEditing(c.id);
+                if (
+                  (!front.trim() && !back.trim()) ||
+                  confirm("放弃尚未保存的卡片编辑？")
+                )
+                  setEditor(false);
               }}
             >
-              编辑
-            </button>
-            <button
-              title="删除卡片"
-              onClick={() =>
-                update(
-                  patchData(mod, { cards: cards.filter((x) => x.id !== c.id) }),
-                )
-              }
-            >
-              <Trash2 size={12} />
+              取消
             </button>
           </div>
-        </article>
-      ))}
-      {!cards.length && (
-        <p className="empty-hint">将知识变成可复习的问答卡片</p>
+        </div>
+      )}
+      {card && !collection ? (
+        <div
+          className="card-study"
+          onKeyDown={(e) => {
+            if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              move(activeIndex - 1);
+            }
+            if (e.key === "ArrowRight") {
+              e.preventDefault();
+              move(activeIndex + 1);
+            }
+          }}
+        >
+          <button
+            className={`study-card ${flipped ? "flipped" : ""}`}
+            aria-label={flipped ? "查看卡片问题" : "查看卡片答案"}
+            aria-pressed={flipped}
+            onClick={() => setFlipped((v) => !v)}
+          >
+            <span>{flipped ? "答案" : "问题"}</span>
+            <div>{flipped ? card.back : card.front}</div>
+            <small>{flipped ? "点击返回问题" : "想好答案后，点击翻面"}</small>
+          </button>
+          <div className="card-study-navigation">
+            <button
+              aria-label="上一张卡片"
+              disabled={!activeIndex}
+              onClick={() => move(activeIndex - 1)}
+            >
+              <ChevronLeft size={17} />
+            </button>
+            <span aria-live="polite">
+              {activeIndex + 1} / {cards.length}
+            </span>
+            <button
+              aria-label="下一张卡片"
+              disabled={activeIndex === cards.length - 1}
+              onClick={() => move(activeIndex + 1)}
+            >
+              <ChevronRight size={17} />
+            </button>
+            <ActionMenu label="当前卡片操作">
+              <button onClick={() => edit(card.id)}>编辑卡片</button>
+              <button onClick={() => remove(card.id)}>删除卡片</button>
+            </ActionMenu>
+          </div>
+          <SourceReferences
+            sources={card.source ? [card.source] : []}
+            jump={p.jump}
+          />
+        </div>
+      ) : collection && cards.length ? (
+        <div className="card-collection">
+          {cards.map((c, i) => (
+            <article key={c.id}>
+              <button
+                className="card-collection-open"
+                onClick={() => {
+                  move(i);
+                  setCollection(false);
+                }}
+              >
+                <span>{i + 1}</span>
+                <strong>{c.front}</strong>
+                <small>{c.back.slice(0, 160)}</small>
+              </button>
+              <ActionMenu label={`卡片 ${i + 1} 操作`}>
+                <button onClick={() => edit(c.id)}>编辑</button>
+                <button onClick={() => remove(c.id)}>删除</button>
+              </ActionMenu>
+            </article>
+          ))}
+        </div>
+      ) : null}
+      {!cards.length && !editor && (
+        <div className="learning-empty">
+          <Layers size={28} />
+          <h3>把知识变成记忆</h3>
+          <p>选择一段材料制作卡片，或手动记下一组问答。</p>
+        </div>
       )}
     </div>
   );
@@ -357,108 +507,258 @@ export function TodoModule({ mod, update }: ModuleProps) {
 }
 export function QuizModule(p: ModuleProps) {
   const { mod, update } = p;
-  const { busy, error, run } = useAI(
+  const { busy, partial, clearPartial, error, run, connected, progress, cancel } = useMaterialAI(
+    p,
     (mod.input || "") + JSON.stringify(mod.data || {}),
   );
+  const previewQuestions = useMemo(() => quizPreview(partial), [partial]);
+  const showingPreview = previewQuestions.length > 0;
+  const [setup, setSetup] = useState(false),
+    [onlyWrong, setOnlyWrong] = useState(false);
+  useEffect(() => {
+    setSetup(false);
+    setOnlyWrong(false);
+  }, [p.taskId, p.workspaceId, mod.id]);
   const quiz = mod.data?.quiz || [],
     answers = mod.data?.answers || {},
     submitted = mod.data?.submitted;
+  useEffect(
+    () =>
+      p.bus.on("material.edit", ({ moduleId }) => {
+        if (moduleId === mod.id) setSetup(true);
+      }),
+    [p.bus, mod.id],
+  );
+  const makeCards = (questions: typeof quiz) => {
+    const text = questions
+      .map(
+        (q) =>
+          `问题：${q.question}\n正确答案：${q.answer}\n解析：${q.explanation}`,
+      )
+      .join("\n\n");
+    if (text.length > 23000) {
+      p.notify("错题内容较多，请使用每道错题下的制作卡片按钮分批整理。");
+      return;
+    }
+    p.send(
+      "cards",
+      text,
+      mod.source ? { ...mod.source, contentKind: "ai" } : undefined,
+      "ai",
+    );
+  };
+  const generate = () => {
+    if (quiz.length && !confirm("生成新题目会替换当前练习和答题进度，继续？"))
+      return;
+    void run("quiz", { text: mod.input }, (result, material) => {
+      setSetup(false);
+      setOnlyWrong(false);
+      return patchData(material, {
+        quiz: result.questions.map((q: any) => ({ ...q, id: uid() })),
+        answers: {},
+        submitted: false,
+      });
+    });
+  };
+  useQuickRun(p, busy, generate);
   return (
-    <div className="utility-body">
-      <ContextInput {...p} />
-      <details open={!quiz.length}>
-        <summary>练习材料</summary>
-        <textarea
-          aria-label="测验材料"
-          placeholder="输入学习内容以生成练习…"
-          value={mod.input || ""}
-          onChange={(e) => update({ input: e.target.value })}
-        />
-        <button
-          className="btn primary"
-          disabled={busy || !mod.input?.trim()}
-          onClick={() => {
-            if (
-              quiz.length &&
-              !confirm("生成新题目会替换当前练习和答题进度，继续？")
-            )
-              return;
-            void run("quiz", { text: mod.input }, (result) =>
-              update(
-                patchData(mod, {
-                  quiz: result.questions.map((q: any) => ({ ...q, id: uid() })),
-                  answers: {},
-                  submitted: false,
-                }),
-              ),
-            );
-          }}
-        >
-          <Sparkles size={14} />
-          {busy ? "生成中…" : "生成测验"}
-        </button>
-      </details>
-      {error && <p className="inline-error">{error}</p>}
-      {quiz.map((q, i) => (
-        <div className="quiz-question" key={q.id}>
-          <h4>
-            {i + 1}. {q.question}
-          </h4>
-          {q.type === "choice" ? (
-            q.options?.map((o, j) => (
-              <label key={j} className="quiz-option">
-                <input
-                  type="radio"
-                  disabled={submitted}
-                  name={mod.id + q.id}
-                  checked={answers[q.id] === o}
-                  onChange={() =>
-                    update(
-                      patchData(mod, { answers: { ...answers, [q.id]: o } }),
-                    )
-                  }
-                />
-                {o}
-              </label>
-            ))
-          ) : (
-            <textarea
-              aria-label={`第${i + 1}题答案`}
-              disabled={submitted}
-              value={answers[q.id] || ""}
-              onChange={(e) =>
-                update(
-                  patchData(mod, {
-                    answers: { ...answers, [q.id]: e.target.value },
-                  }),
-                )
-              }
-              placeholder="写下你的理解…"
-            />
-          )}
-          {submitted && (
-            <div className="quiz-explanation">
-              <b>
-                {q.type === "short"
-                  ? "参考答案，请自行对照"
-                  : answers[q.id] === q.answer
-                    ? "回答正确"
-                    : "继续加油"}
-              </b>
-              <p>答案：{q.answer}</p>
-              <p>{q.explanation}</p>
-            </div>
-          )}
+    <div className="utility-body quiz-module">
+      {!!quiz.length && !showingPreview && (
+        <div className="learning-section-toolbar">
+          <span>
+            {submitted
+              ? `答对 ${quiz.filter((q) => q.type === "choice" && answers[q.id] === q.answer).length} / ${quiz.filter((q) => q.type === "choice").length} 道选择题`
+              : `已作答 ${quiz.filter((q) => answers[q.id]?.trim()).length} / ${quiz.length}`}
+          </span>
+          <button className="text-button" disabled={busy} onClick={() => setSetup((v) => !v)}>
+            {setup ? "返回答题" : "重新出题"}
+          </button>
         </div>
-      ))}
+      )}
+      {(!quiz.length || setup) && (
+        <div className="learning-setup">
+          <LearningInput p={p} label="测验学习内容" />
+          {!quiz.length && (
+            <p className="setup-caption">
+              根据所选内容生成单选题，完成后查看解析。
+            </p>
+          )}
+          <button
+            className="btn primary"
+            disabled={
+              busy || (isDirectInput(p) ? !mod.input?.trim() : !connected)
+            }
+            onClick={generate}
+          >
+            <Sparkles size={14} />
+            {busy ? "出题中…" : quiz.length ? "生成新测验" : "生成测验"}
+          </button>
+        </div>
+      )}
+      <DocumentStatus
+        mod={mod}
+        busy={busy}
+        progress={progress}
+        cancel={cancel}
+      />
+      {error && <p className="inline-error" role="alert">{error}</p>}
+      {showingPreview && (
+        <section className="quiz-stream-preview" aria-label="测验生成预览" aria-busy={busy}>
+          <p className="small" role="status">
+            {busy ? `正在出题，已生成 ${previewQuestions.length} 道，完成后即可作答。` : "生成已中断，以下题目尚未组成完整测验，原练习与作答仍保留。"}
+          </p>
+          {previewQuestions.map((q, i) => (
+            <div className="quiz-question" key={i}>
+              <h4>{i + 1}. <MathText>{q.question}</MathText></h4>
+              {q.options.map((option, j) => (
+                <label className="quiz-option" key={j}>
+                  <input type="radio" disabled name={`${mod.id}-preview-${i}`} />
+                  <MathText>{option}</MathText>
+                </label>
+              ))}
+            </div>
+          ))}
+          {!busy && <div className="quiz-review-actions">
+            <button className="text-button" onClick={generate}>重新生成</button>
+            <button className="text-button" onClick={clearPartial}>{quiz.length ? "返回原测验" : "收起预览"}</button>
+          </div>}
+        </section>
+      )}
+      {!showingPreview && <>
+      {submitted && (
+        <div className="quiz-review-actions">
+          <button
+            className="text-button"
+            aria-pressed={onlyWrong}
+            onClick={() => setOnlyWrong((v) => !v)}
+          >
+            {onlyWrong ? "查看全部题目" : "只看错题"}
+          </button>
+          <button
+            className="text-button"
+            disabled={
+              !quiz.some(
+                (q) => q.type === "choice" && answers[q.id] !== q.answer,
+              )
+            }
+            onClick={() =>
+              makeCards(
+                quiz.filter(
+                  (q) => q.type === "choice" && answers[q.id] !== q.answer,
+                ),
+              )
+            }
+          >
+            <Layers size={13} />
+            错题制作卡片
+          </button>
+        </div>
+      )}
+      {quiz.map((q, i) =>
+        !onlyWrong ||
+        !submitted ||
+        q.type !== "choice" ||
+        answers[q.id] !== q.answer ? (
+          <div className="quiz-question" key={q.id}>
+            <h4>
+              {i + 1}. <MathText>{q.question}</MathText>
+            </h4>
+            {q.type === "choice" ? (
+              q.options?.map((o, j) => (
+                <label key={j} className="quiz-option">
+                  <input
+                    type="radio"
+                    disabled={submitted || busy}
+                    name={mod.id + q.id}
+                    checked={answers[q.id] === o}
+                    onChange={() =>
+                      update(
+                        patchData(mod, { answers: { ...answers, [q.id]: o } }),
+                      )
+                    }
+                  />
+                  <MathText>{o}</MathText>
+                </label>
+              ))
+            ) : (
+              <textarea
+                aria-label={`第${i + 1}题答案`}
+                disabled={submitted || busy}
+                value={answers[q.id] || ""}
+                onChange={(e) =>
+                  update(
+                    patchData(mod, {
+                      answers: { ...answers, [q.id]: e.target.value },
+                    }),
+                  )
+                }
+                placeholder="写下你的理解…"
+              />
+            )}
+            <QuizFeedback
+              type={q.type}
+              answer={q.answer}
+              userAnswer={answers[q.id]}
+              explanation={q.explanation}
+              submitted={!!submitted}
+            />
+            {submitted && q.type === "choice" && answers[q.id] !== q.answer && (
+              <button className="text-button" onClick={() => makeCards([q])}>
+                <Layers size={13} />
+                将这道错题制作成卡片
+              </button>
+            )}
+          </div>
+        ) : null,
+      )}
+      {onlyWrong &&
+        submitted &&
+        quiz.every(
+          (q) => q.type === "choice" && answers[q.id] === q.answer,
+        ) && <p className="empty-hint">本次全部答对，没有错题。</p>}
       {!!quiz.length && (
         <button
           className="btn primary full"
-          disabled={!submitted && quiz.some((q) => !answers[q.id]?.trim())}
-          onClick={() => update(patchData(mod, { submitted: !submitted }))}
+          disabled={busy || (!submitted && quiz.some((q) => !answers[q.id]?.trim()))}
+          onClick={() =>
+            update(
+              patchData(mod, {
+                submitted: !submitted,
+                ...(!submitted
+                  ? {
+                      quizAttempts: [
+                        ...(mod.data?.quizAttempts || []).slice(-19),
+                        quizAttempt(mod),
+                      ],
+                    }
+                  : {}),
+              }),
+            )
+          }
         >
           {submitted ? "重新作答" : "提交并查看解析"}
         </button>
+      )}
+      </>}
+      <SourceReferences
+        sources={
+          mod.data?.flow?.inputs.flatMap((p) => p.sources) ||
+          (mod.source ? [mod.source] : [])
+        }
+        jump={p.jump}
+      />
+      {!!mod.data?.quizAttempts?.length && (
+        <details className="quiz-history">
+          <summary>练习记录 · {mod.data.quizAttempts.length}</summary>
+          {[...mod.data.quizAttempts].reverse().map((attempt) => (
+            <p key={attempt.id}>
+              {new Date(attempt.createdAt).toLocaleString()} · 答对{" "}
+              {attempt.questions.filter((q) => q.correct === true).length} /{" "}
+              {attempt.questions.filter((q) => q.type === "choice").length}{" "}
+              道选择题
+            </p>
+          ))}
+        </details>
       )}
     </div>
   );
@@ -472,9 +772,11 @@ export function PomodoroModule({ mod, update }: ModuleProps) {
   };
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
+    setNow(Date.now());
+    if (!timer.endsAt) return;
     const t = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(t);
-  }, []);
+  }, [timer.endsAt]);
   const remaining = timer.endsAt
     ? Math.max(0, Math.ceil((timer.endsAt - now) / 1000))
     : timer.remaining;
@@ -494,6 +796,9 @@ export function PomodoroModule({ mod, update }: ModuleProps) {
   }, [remaining, timer.endsAt]);
   return (
     <div className="pomodoro-module">
+      {mod.data?.text && (
+        <p className="focus-topic">本次专注：{mod.data.text}</p>
+      )}
       <div className="timer-mode">
         {timer.mode === "focus" ? "保持专注，慢慢来" : "休息一下，让思考沉淀"}
       </div>
@@ -742,14 +1047,26 @@ export function CalendarModule({ mod, update }: ModuleProps) {
 export function MindmapModule(p: ModuleProps) {
   const { mod, update } = p;
   const nodes = mod.data?.nodes || [];
-  const [selected, setSelected] = useState<string>();
-  const { busy, error, run } = useAI(
+  const [selected, setSelected] = useState<string>(),
+    [editMaterial, setEditMaterial] = useState(false);
+  useEffect(() => {
+    setSelected(undefined);
+    setEditMaterial(false);
+  }, [p.taskId, p.workspaceId, mod.id]);
+  const { busy, error, run, connected, progress, cancel } = useMaterialAI(
+    p,
     (mod.input || "") + JSON.stringify(mod.data || {}),
   );
   const scale = mod.data?.mapScale || 1,
     pan = mod.data?.mapPan || { x: 0, y: 0 };
+  useEffect(
+    () =>
+      p.bus.on("material.edit", ({ moduleId }) => {
+        if (moduleId === mod.id) setEditMaterial(true);
+      }),
+    [p.bus, mod.id],
+  );
   const host = useRef<HTMLDivElement>(null);
-  const node = nodes.find((n) => n.id === selected);
   const move = (e: React.PointerEvent, id?: string) => {
     if ((e.target as HTMLElement).closest("button,input")) return;
     e.preventDefault();
@@ -794,92 +1111,49 @@ export function MindmapModule(p: ModuleProps) {
     el.addEventListener("pointerup", end);
     el.addEventListener("pointercancel", end);
   };
+  const zoomMap = (delta: number) => {
+    const next = Math.min(1.8, Math.max(0.3, Math.round((scale + delta) * 10) / 10));
+    const stage = host.current?.parentElement;
+    const x = (stage?.clientWidth || 0) / 2, y = (stage?.clientHeight || 0) / 2;
+    update(patchData(mod, {
+      mapScale: next,
+      mapPan: { x: x - (x - pan.x) * next / scale, y: y - (y - pan.y) * next / scale },
+    }));
+  };
+  const generate = () => {
+    if (nodes.length && !confirm("AI 生成会替换当前节点，继续？")) return;
+    void run("mindmap", { text: mod.input }, (result, material) => {
+      setEditMaterial(false);
+      return patchData(material, {
+        nodes: result.nodes,
+        mapPan: { x: 0, y: 0 },
+        mapScale: 1,
+      });
+    });
+  };
+  useQuickRun(p, busy, generate);
   return (
     <div className="mindmap-module">
-      <div className="map-controls">
-        <button
-          className="btn mini"
-          onClick={() => {
-            const id = uid();
-            update(
-              patchData(mod, {
-                nodes: [
-                  ...nodes,
-                  {
-                    id,
-                    parentId: node?.id,
-                    text: "新节点",
-                    x: node ? node.x + 190 : 50,
-                    y: node ? node.y + 70 : nodes.length * 80 + 50,
-                  },
-                ],
-              }),
-            );
-            setSelected(id);
-          }}
-        >
-          <Plus size={12} />
-          {node ? "添加子节点" : "添加节点"}
-        </button>
-        <button
-          className="btn mini"
-          disabled={!node}
-          onClick={() => {
-            const ids = new Set([selected]);
-            let changed = true;
-            while (changed) {
-              changed = false;
-              nodes.forEach((n) => {
-                if (n.parentId && ids.has(n.parentId) && !ids.has(n.id)) {
-                  ids.add(n.id);
-                  changed = true;
-                }
-              });
-            }
-            update(
-              patchData(mod, { nodes: nodes.filter((n) => !ids.has(n.id)) }),
-            );
-            setSelected(undefined);
-          }}
-        >
-          <Trash2 size={12} />
-        </button>
-        <input
-          aria-label="思维导图缩放"
-          type="range"
-          min="30"
-          max="180"
-          value={Math.round(scale * 100)}
-          onChange={(e) =>
-            update(patchData(mod, { mapScale: Number(e.target.value) / 100 }))
-          }
-        />
-        <button
-          title="恢复视图"
-          onClick={() =>
-            update(patchData(mod, { mapPan: { x: 0, y: 0 }, mapScale: 1 }))
-          }
-        >
-          <RotateCcw size={13} />
-        </button>
-      </div>
-      {node && (
-        <input
-          className="map-label-input"
-          aria-label="节点文字"
-          value={node.text}
-          onChange={(e) =>
-            update(
-              patchData(mod, {
-                nodes: nodes.map((n) =>
-                  n.id === node.id ? { ...n, text: e.target.value } : n,
-                ),
-              }),
-            )
-          }
-        />
+      {(editMaterial || !nodes.length) && (
+        <LearningInput p={p} label="导图学习内容" />
       )}
       <div className="map-stage" onPointerDown={(e) => move(e)}>
+        <div className="map-toolbar" role="group" aria-label="思维导图操作">
+          <button className="btn mini" disabled={busy || (isDirectInput(p) ? !mod.input?.trim() : !connected)} onClick={generate}>
+            <Sparkles size={14} />
+            {busy ? "生成中…" : nodes.length ? "重新生成" : "生成导图"}
+          </button>
+          <button className="btn mini" title="缩小" aria-label="缩小思维导图" disabled={scale <= 0.3} onClick={() => zoomMap(-0.1)}>
+            <ZoomOut size={16} />
+          </button>
+          <button className="btn mini" title="放大" aria-label="放大思维导图" disabled={scale >= 1.8} onClick={() => zoomMap(0.1)}>
+            <ZoomIn size={16} />
+          </button>
+        </div>
+        {(busy || error) && <div className="map-feedback" onPointerDown={(e) => e.stopPropagation()}>
+          {busy && <DocumentStatus mod={mod} busy progress={progress} cancel={cancel} />}
+          {error && <p className="inline-error" role="alert">{error}</p>}
+        </div>}
         <div
           className="map-world"
           ref={host}
@@ -927,40 +1201,9 @@ export function MindmapModule(p: ModuleProps) {
           ))}
         </div>
         {!nodes.length && (
-          <div className="map-empty">添加节点，或让 AI 从材料生成导图</div>
+          <div className="map-empty">选择学习材料，点击生成导图</div>
         )}
       </div>
-      <details>
-        <summary>AI 生成思维导图</summary>
-        <ContextInput {...p} />
-        <textarea
-          aria-label="导图材料"
-          placeholder="输入材料…"
-          value={mod.input || ""}
-          onChange={(e) => update({ input: e.target.value })}
-        />
-        <button
-          className="btn primary"
-          disabled={busy || !mod.input?.trim()}
-          onClick={() => {
-            if (nodes.length && !confirm("AI 生成会替换当前节点，继续？"))
-              return;
-            void run("mindmap", { text: mod.input }, (result) =>
-              update(
-                patchData(mod, {
-                  nodes: result.nodes,
-                  mapPan: { x: 0, y: 0 },
-                  mapScale: 1,
-                }),
-              ),
-            );
-          }}
-        >
-          <Sparkles size={14} />
-          {busy ? "生成中…" : "生成导图"}
-        </button>
-        {error && <p className="inline-error">{error}</p>}
-      </details>
     </div>
   );
 }

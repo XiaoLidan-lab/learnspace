@@ -1,5 +1,13 @@
+import { workspaceMaterials } from "./materialBindings.js";
 import { z } from "zod";
+import {
+  customConfigSchema,
+  connectionSchema,
+  defaultCustomConfig,
+} from "./customAI.js";
+import { connectionError, privateConnectionSource } from "./connectionGraph.js";
 import { types, labels, MAX_MODULES, type ModuleType } from "./definitions.js";
+import type { LearningTask } from "./tasks.js";
 export { types, labels, MAX_MODULES } from "./definitions.js";
 export type { ModuleType } from "./definitions.js";
 export const layoutSchema = z
@@ -34,18 +42,72 @@ const moduleSchema = z
     settings: publicSettingsSchema.optional(),
     group: z.string().min(1).max(80).optional(),
     locked: z.boolean().optional(),
-    instanceId: z.string().max(80).optional(),
+    instanceId: z.string().min(1).max(80).optional(),
+    customConfig: customConfigSchema.optional(),
   })
   .strict();
 export const templateSchema = z
   .object({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     title: z.string().min(1).max(80),
     description: z.string().max(1000),
     modules: z.array(moduleSchema).max(MAX_MODULES),
+    connections: z.array(connectionSchema).max(48).optional(),
   })
   .strict()
   .superRefine((t, c) => {
+    const issue = (message: string) => c.addIssue({ code: "custom", message });
+    if (new TextEncoder().encode(JSON.stringify(t)).length > 102400)
+      issue("模板不能超过 100 KB");
+    if (
+      t.version === 2 &&
+      /(?:sk-[A-Za-z0-9_-]{20,}|sb_secret_[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9_.-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,})/.test(
+        JSON.stringify(t),
+      )
+    )
+      issue("模板疑似包含 API Key 或凭证，请移除后保存");
+    if (t.version === 1) {
+      if (
+        t.connections !== undefined ||
+        t.modules.some((m) => m.customConfig || m.type === "custom-ai")
+      )
+        issue("自定义模块及连接需要 V2 模板");
+    } else {
+      if (!t.connections) issue("V2 模板缺少连接列表");
+      const ids = t.modules.map((m) => m.instanceId);
+      if (
+        ids.some((id) => !id || !/^m[1-9][0-9]*$/.test(id)) ||
+        new Set(ids).size !== ids.length
+      )
+        issue("模板模块标识无效或重复");
+      if (t.modules.some((m) => m.group && !/^g[1-9][0-9]*$/.test(m.group)))
+        issue("模板分组标识无效");
+      if (t.modules.some((m) => (m.type === "custom-ai") !== !!m.customConfig))
+        issue("模块配置不兼容");
+      for (const e of t.connections || []) {
+        const source = t.modules.find(
+          (m) => m.instanceId === e.source.moduleId,
+        );
+        const privateSource = privateConnectionSource(
+          source?.type,
+          e.source.port,
+        );
+        if (
+          !/^c[1-9][0-9]*$/.test(e.id) ||
+          e.source.noteId ||
+          e.source.query ||
+          e.source.itemId ||
+          !!e.source.needsBinding !== privateSource
+        )
+          issue("模板连接不得携带私人绑定，私人来源必须重新绑定");
+      }
+      const error = connectionError(
+        t.modules.map((m) => ({ ...m, id: m.instanceId! })),
+        t.connections || [],
+      );
+      if (error) issue(error);
+    }
+
     t.modules.forEach((a, i) =>
       t.modules.slice(i + 1).forEach((b) => {
         if (a.group && a.group === b.group) {
@@ -65,6 +127,8 @@ export const templateSchema = z
   });
 export type Template = z.infer<typeof templateSchema>;
 export type Source = {
+  noteId?: string;
+  contentKind?: ContentKind;
   kind?: "pdf" | "web" | "video" | "text";
   moduleId?: string;
   resourceId: string;
@@ -79,6 +143,8 @@ export type Source = {
   createdAt?: number;
 };
 export type ModuleData = {
+  custom?: import("./customAI.js").CustomRuntime;
+  flow?: import("./flowSchema.js").FlowState;
   text?: string;
   url?: string;
   transcript?: string;
@@ -110,12 +176,16 @@ export type ModuleData = {
   }[];
   answers?: Record<string, string>;
   submitted?: boolean;
+  quizAttempts?: import("zod").z.infer<
+    typeof import("./taskAssistantSchemas.js").quizAttemptSchema
+  >[];
   imageZoom?: number;
   autoSync?: boolean;
   autoTranslate?: boolean;
   webMode?: "embed" | "external";
 };
 export type Mod = {
+  customConfig?: import("./customAI.js").CustomConfig;
   id: string;
   type: ModuleType;
   title: string;
@@ -131,16 +201,34 @@ export type Mod = {
   output?: string;
   language?: string;
   source?: Source;
-  messages?: { role: "user" | "assistant"; content: string; source?: Source }[];
+  activeNoteId?: string;
+  messages?: {
+    role: "user" | "assistant";
+    content: string;
+    source?: Source;
+    sources?: Source[];
+  }[];
 };
 export type Workspace = {
   id: string;
   title: string;
   description: string;
   modules: Mod[];
+  connections?: import("zod").z.infer<
+    typeof import("./customAI.js").connectionSchema
+  >[];
   updatedAt: number;
   createdAt: number;
   origin?: string;
+  tasks?: LearningTask[];
+  activeTaskId?: string;
+  isolationVersion?: 1;
+  cloud?: {
+    ownerId: string;
+    revision: number;
+    syncedHash: string;
+    syncedAt: number;
+  };
 };
 export type Note = {
   id: string;
@@ -148,8 +236,13 @@ export type Note = {
   moduleId: string;
   content: string;
   sources: Source[];
+  contentKind?: ContentKind;
+  originRun?: { moduleId: string; runId: string };
+  taskId?: string;
 };
+export type ContentKind = "original" | "ai" | "user" | "mixed" | "unknown";
 export type Resource = {
+  extractedText?: string;
   id: string;
   name: string;
   version: string;
@@ -158,29 +251,91 @@ export type Resource = {
 };
 export const uid = () => crypto.randomUUID();
 export function safeTemplate(w: Workspace): Template {
-  return {
-    version: 1,
+  const v2 =
+    w.modules.some((m) => m.type === "custom-ai") ||
+    !!workspaceMaterials(w).length;
+  const ids = new Map(w.modules.map((m, i) => [m.id, `m${i + 1}`]));
+  const groups = new Map<string, string>();
+  const result = {
+    version: v2 ? (2 as const) : (1 as const),
     title: w.title,
     description: w.description,
-    modules: w.modules.map((m) => ({
-      type: m.type,
-      title: m.title,
-      layout: { ...m.layout },
-      ...(m.group ? { group: m.group } : {}),
-      ...(m.locked ? { locked: true } : {}),
-      ...(m.settings
-        ? { settings: publicSettingsSchema.parse(m.settings) }
-        : {}),
-    })),
+    modules: w.modules.map((m) => {
+      if (m.group && !groups.has(m.group))
+        groups.set(m.group, `g${groups.size + 1}`);
+      return {
+        type: m.type,
+        title: m.title,
+        layout: { ...m.layout },
+        ...(v2 ? { instanceId: ids.get(m.id) } : {}),
+        ...(m.group ? { group: groups.get(m.group) } : {}),
+        ...(m.locked ? { locked: true } : {}),
+        ...(m.settings
+          ? { settings: publicSettingsSchema.parse(m.settings) }
+          : {}),
+        ...(v2 && m.type === "custom-ai"
+          ? {
+              customConfig: structuredClone(
+                m.customConfig || defaultCustomConfig(),
+              ),
+            }
+          : {}),
+      };
+    }),
+    ...(v2
+      ? {
+          connections: workspaceMaterials(w)
+            .filter(
+              (e) =>
+                w.modules.some((m) => m.id === e.source.moduleId) &&
+                w.modules.some((m) => m.id === e.target.moduleId),
+            )
+            .map((e, i) => ({
+              id: `c${i + 1}`,
+              source: {
+                moduleId: ids.get(e.source.moduleId)!,
+                port: e.source.port,
+                ...(e.source.range ? { range: e.source.range } : {}),
+                ...(e.source.itemId ||
+                privateConnectionSource(
+                  w.modules.find((m) => m.id === e.source.moduleId)?.type,
+                  e.source.port,
+                )
+                  ? { needsBinding: true as const }
+                  : {}),
+              },
+              target: {
+                moduleId: ids.get(e.target.moduleId)!,
+                field: e.target.field,
+              },
+              trigger: "manual" as const,
+              mode: "replace" as const,
+            })),
+        }
+      : {}),
   };
+  return result;
 }
-export function fromTemplate(t: Template, origin?: string): Workspace {
-  const groups = new Map<string, string>();
+export function fromTemplate(input: Template, origin?: string): Workspace {
+  const raw = { ...input } as Record<string, unknown>;
+  for (const key of [
+    "id",
+    "category",
+    "author",
+    "uses",
+    "color",
+    "sharedMaterials",
+  ])
+    delete raw[key];
+  const t = templateSchema.parse(raw);
+  const groups = new Map<string, string>(),
+    ids = new Map(t.modules.map((m) => [m.instanceId, uid()]));
   t.modules.forEach((m) => {
     if (m.group && !groups.has(m.group)) groups.set(m.group, uid());
   });
   return {
     id: uid(),
+    isolationVersion: 1,
     title: t.title,
     description: t.description,
     createdAt: Date.now(),
@@ -192,9 +347,26 @@ export function fromTemplate(t: Template, origin?: string): Workspace {
       settings: m.settings ? { ...m.settings } : undefined,
       locked: m.locked,
       group: m.group ? groups.get(m.group) : undefined,
-      id: uid(),
+      id: t.version === 2 ? ids.get(m.instanceId)! : uid(),
       layout: { ...m.layout },
+      ...(m.customConfig
+        ? {
+            customConfig: structuredClone(
+              m.customConfig || defaultCustomConfig(),
+            ),
+          }
+        : {}),
     })),
+    ...(t.version === 2
+      ? {
+          connections: (t.connections || []).map((e) => ({
+            ...structuredClone(e),
+            id: uid(),
+            source: { ...e.source, moduleId: ids.get(e.source.moduleId)! },
+            target: { ...e.target, moduleId: ids.get(e.target.moduleId)! },
+          })),
+        }
+      : {}),
   };
 }
 export const builtins: (Template & {
@@ -214,7 +386,7 @@ export const builtins: (Template & {
     color: "lavender",
     version: 1,
     modules: [
-      { type: "pdf", title: "PDF 阅读", layout: { x: 0, y: 0, w: 6, h: 8 } },
+      { type: "pdf", title: "文件阅读", layout: { x: 0, y: 0, w: 6, h: 8 } },
       {
         type: "translate",
         title: "AI 翻译",

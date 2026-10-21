@@ -19,10 +19,14 @@ import {
   applyPlan,
   splitModules,
 } from "../src/layout";
-test("16 种模块按四大类注册，每类四种", () => {
-  assert.equal(types.length, 16);
+test("既有 16 种模块与新增自定义 AI 模块注册", () => {
+  assert.equal(types.length, 17);
   for (const c of categories)
-    assert.equal(types.filter((t) => definitions[t].category === c).length, 4);
+    assert(types.some((t) => definitions[t].category === c));
+  assert.equal(definitions.cards.category, "练习巩固");
+  assert.equal(definitions.note.category, "理解与整理");
+  assert.equal(definitions.pdf.category, "内容来源");
+  assert.equal(definitions.pomodoro.category, "辅助工具");
 });
 test("事件仅限工作台，去重并阻止递归事件循环", () => {
   const a = new WorkspaceBus("a"),
@@ -44,8 +48,8 @@ test("事件仅限工作台，去重并阻止递归事件循环", () => {
   a.emit("selection.changed", s);
   assert.equal(count, 1);
   assert.equal(b.selection, null);
-  a.emit("selection.changed", {...s,start:5,end:10});
-  assert.equal(count,2);
+  a.emit("selection.changed", { ...s, start: 5, end: 10 });
+  assert.equal(count, 2);
   a.emit("selection.cleared", {});
   assert.equal(a.selection, null);
 });
@@ -92,6 +96,17 @@ test("AI 用实例 ID 保留多个同类型模块的内容", () => {
   const result = applyPlan(base.modules, t);
   assert.equal(result[0].data?.text, "B");
   assert.equal(result[1].data?.text, "A");
+});
+test("AI 草案新增同类型实例不会继承被移除模块的私人内容", () => {
+  const base = fromTemplate(builtins[3]);
+  base.modules[0].data = { text: "private A" };
+  base.modules[1].data = { text: "private B" };
+  const t = safeTemplate(base);
+  t.modules[0].instanceId = base.modules[0].id;
+  const result = applyPlan(base.modules, t);
+  assert.equal(result[0].data?.text, "private A");
+  assert.equal(result[1].data, undefined);
+  assert.notEqual(result[1].id, base.modules[1].id);
 });
 test("分屏布局没有重叠", () => {
   const base = fromTemplate(builtins[0]);

@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import { lazy, type ComponentType } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   FileText,
@@ -24,27 +24,55 @@ import {
   type ModuleDefinition,
 } from "./definitions";
 import type { ModuleProps } from "./moduleProps";
-import { LegacyBody } from "./LegacyBody";
-import {
-  TextModule,
-  WebModule,
-  VideoModule,
-  ImageModule,
-} from "./InputModules";
-import {
-  SummaryModule,
-  CardsModule,
-  TodoModule,
-  QuizModule,
-  PomodoroModule,
-  CalendarModule,
-  MindmapModule,
-} from "./LearningModules";
+const LegacyBody = lazy(() =>
+  import("./LegacyBody").then((m) => ({ default: m.LegacyBody })),
+);
+const TextModule = lazy(() =>
+  import("./InputModules").then((m) => ({ default: m.TextModule })),
+);
+const WebModule = lazy(() =>
+  import("./InputModules").then((m) => ({ default: m.WebModule })),
+);
+const VideoModule = lazy(() =>
+  import("./InputModules").then((m) => ({ default: m.VideoModule })),
+);
+const ImageModule = lazy(() =>
+  import("./InputModules").then((m) => ({ default: m.ImageModule })),
+);
+const SummaryModule = lazy(() =>
+  import("./LearningModules").then((m) => ({ default: m.SummaryModule })),
+);
+const CardsModule = lazy(() =>
+  import("./LearningModules").then((m) => ({ default: m.CardsModule })),
+);
+const TodoModule = lazy(() =>
+  import("./LearningModules").then((m) => ({ default: m.TodoModule })),
+);
+const QuizModule = lazy(() =>
+  import("./LearningModules").then((m) => ({ default: m.QuizModule })),
+);
+const PomodoroModule = lazy(() =>
+  import("./LearningModules").then((m) => ({ default: m.PomodoroModule })),
+);
+const CalendarModule = lazy(() =>
+  import("./LearningModules").then((m) => ({ default: m.CalendarModule })),
+);
+const MindmapModule = lazy(() =>
+  import("./LearningModules").then((m) => ({ default: m.MindmapModule })),
+);
 export type RegisteredModule = ModuleDefinition & {
   icon: LucideIcon;
   component: ComponentType<ModuleProps>;
 };
+const CustomAIModule = lazy(() =>
+  import("./CustomAIModule").then((m) => ({ default: m.CustomAIModule })),
+);
 export const registry: Record<ModuleType, RegisteredModule> = {
+  "custom-ai": {
+    ...definitions["custom-ai"],
+    icon: MessageCircle,
+    component: CustomAIModule,
+  },
   pdf: { ...definitions.pdf, icon: FileText, component: LegacyBody },
   web: { ...definitions.web, icon: Globe, component: WebModule },
   video: { ...definitions.video, icon: Video, component: VideoModule },

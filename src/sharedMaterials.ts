@@ -1,3 +1,4 @@
+import { noteTitle } from "./noteContent";
 import { z } from "zod";
 import { safeUrl } from "./platforms";
 import {
@@ -119,6 +120,8 @@ export function materialCandidates(
           : undefined;
     const resource = resources.find((r) => r.id === fileId);
     if (resource) {
+      const supportedReaderFile =
+        m.type !== "pdf" || resource.name.toLowerCase().endsWith(".pdf");
       const mime =
         resource.file.type || (m.type === "pdf" ? "application/pdf" : "");
       result.push({
@@ -127,8 +130,9 @@ export function materialCandidates(
         kind: "file",
         name: resource.name,
         resource,
-        unavailable:
-          resource.file.size > MAX_SHARED_FILE
+        unavailable: !supportedReaderFile
+          ? "Word 和文本文件暂不支持社区附带，请安装后自行上传"
+          : resource.file.size > MAX_SHARED_FILE
             ? "共享文件最大 50 MB"
             : !sharedMimeTypes.includes(mime)
               ? "此文件格式暂不支持共享"
@@ -173,12 +177,7 @@ export function materialCandidates(
               id: `${m.id}:note:${n.id}`,
               kind: "note",
               noteIndex,
-              name: (
-                n.content
-                  .split("\n")[0]
-                  .replace(/^#+\s*/, "")
-                  .replace(/\*\*/g, "") || "学习笔记"
-              ).slice(0, 200),
+              name: noteTitle(n.content, "学习笔记"),
               value: n.content,
               unavailable:
                 noteIndex > 99 || n.content.length > 50000
@@ -194,6 +193,8 @@ export function validateMaterialBindings(
   materials: unknown,
 ): SharedMaterial[] {
   const parsed = sharedMaterialsSchema.parse(materials);
+  if (template.version === 2 && parsed.length)
+    throw Error("V2 组合模板不能附带私人资料和笔记，请安装后重新绑定");
   for (const m of parsed) {
     const type = template.modules[m.moduleIndex]?.type;
     if (m.kind === "file" && !["pdf", "image", "video"].includes(type))

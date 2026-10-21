@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Languages,
   MessageCircle,
   NotebookPen,
-  ListCollapse,
   Layers,
   ArrowUpRight,
 } from "lucide-react";
@@ -20,6 +20,35 @@ export function SelectionTools({
   bus: ModuleProps["bus"];
   send: ModuleProps["send"];
 }) {
+  const anchor = useRef<HTMLSpanElement>(null);
+  const [position, setPosition] = useState({ left: 12, top: 12 });
+  useLayoutEffect(() => {
+    if (!text) return;
+    const place = () => {
+      const selection = window.getSelection();
+      const owner = anchor.current?.closest("[data-module-id]");
+      const valid =
+        selection?.rangeCount &&
+        selection.toString().trim() === text &&
+        (!owner || owner.contains(selection.anchorNode));
+      const rect = valid
+        ? selection.getRangeAt(0).getBoundingClientRect()
+        : anchor.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = Math.min(380, window.innerWidth - 24);
+      setPosition({
+        left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
+        top: Math.max(12, Math.min(rect.bottom + 8, window.innerHeight - 60)),
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [text]);
   useEffect(() => {
     if (text)
       bus.emit("selection.changed", {
@@ -29,26 +58,46 @@ export function SelectionTools({
         createdAt: Date.now(),
       });
     else bus.emit("selection.cleared", { moduleId: source.moduleId });
-  }, [text, source.moduleId, source.page, source.timestamp]);
+  }, [
+    text,
+    source.moduleId,
+    source.page,
+    source.timestamp,
+    source.resourceId,
+    source.version,
+    source.contentKind,
+    source.start,
+    source.end,
+  ]);
   if (!text) return null;
   return (
-    <div className="selection-tools">
-      <span>{text.length} 字</span>
-      {(
-        [
-          ["translate", Languages, "翻译"],
-          ["chat", MessageCircle, "提问"],
-          ["note", NotebookPen, "笔记"],
-          ["summary", ListCollapse, "总结"],
-          ["cards", Layers, "卡片"],
-        ] as const
-      ).map(([type, I, label]) => (
-        <button key={type} onClick={() => send(type, text, source)}>
-          <I size={13} />
-          {label}
-        </button>
-      ))}
-    </div>
+    <>
+      <span ref={anchor} />
+      {createPortal(
+        <div
+          className="selection-tools selection-popover"
+          role="toolbar"
+          aria-label="选区操作"
+          style={position}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          {(
+            [
+              ["translate", Languages, "翻译"],
+              ["chat", MessageCircle, "提问"],
+              ["note", NotebookPen, "添加到笔记"],
+              ["cards", Layers, "制作卡片"],
+            ] as const
+          ).map(([type, I, label]) => (
+            <button key={type} onClick={() => send(type, text, source)}>
+              <I size={13} />
+              {label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 export function SourceLink({
@@ -62,7 +111,10 @@ export function SourceLink({
     <button className="source-chip" onClick={() => jump(source)}>
       {source.resourceName || source.kind || "原文"}
       {source.kind === "pdf" || !source.kind
-        ? ` · 第 ${source.page} 页`
+        ? source.resourceName &&
+          /\.(docx?|md|markdown|txt)$/i.test(source.resourceName)
+          ? ` · 文本区段 ${source.page}`
+          : ` · 第 ${source.page} 页`
         : source.timestamp != null
           ? ` · ${Math.floor(source.timestamp)} 秒`
           : ""}
@@ -75,7 +127,9 @@ export function ContextInput({
   update,
   bus,
   jump,
+  workspace,
 }: {
+  workspace?: ModuleProps["workspace"];
   mod: ModuleProps["mod"];
   update: ModuleProps["update"];
   bus: ModuleProps["bus"];
@@ -91,14 +145,29 @@ export function ContextInput({
       clear();
     };
   }, [bus]);
+  const connected = workspace?.connections?.some(
+    (e) => e.target.moduleId === mod.id,
+  );
+  if (
+    ["chat", "translate", "summary", "mindmap", "cards", "quiz"].includes(
+      mod.type,
+    )
+  )
+    return null;
   return (
     <div className="context-controls">
-      {selection && selection.moduleId !== mod.id && (
+      {!connected && selection && selection.moduleId !== mod.id && (
         <button
           className="text-button"
-          onClick={() => update({ input: selection.text, source: selection })}
+          onClick={() =>
+            update(
+              mod.type === "chat"
+                ? { source: selection }
+                : { input: selection.text, source: selection },
+            )
+          }
         >
-          使用当前选区 · {selection.text.length} 字
+          添加选区作为参考 · {selection.text.length} 字
         </button>
       )}
       <SourceLink source={mod.source} jump={jump} />
