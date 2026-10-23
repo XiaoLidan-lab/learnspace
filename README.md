@@ -165,22 +165,6 @@ npm start         # 运行已构建的本地生产版本
 - **来源需要判断**：PDF 引用可回跳页码，尚无精确选段高亮；AI 输出不代替原文核实。
 - **设备体验有区别**：桌面适合自由布局，窄屏使用纵向排列与点击添加。
 
-## 继续了解
-
-[功能与架构](docs/implementation.md) · [设计规范](DESIGN.md) · [部署指南](docs/vercel-deployment.md) · [历史联调记录](docs/live-verification.md)
-
-<details>
-<summary>历史开发记录</summary>
-
-以下文档记录当时的实现与验证，部分任务、助手和旧模块入口已移除：
-
-- [模块数据连接](docs/phase5-batch3.md)
-- [组合模板](docs/phase5-batch4.md)
-- [AI 工作台搭建](docs/phase5-batch5.md)
-- [早期任务与助手](docs/task-assistant.md)
-
-</details>
-
 <div align="center">
 
 **Your space. Your pace.**
